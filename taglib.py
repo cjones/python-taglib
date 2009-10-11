@@ -37,7 +37,11 @@
 # FLAC:   http://flac.sourceforge.net/format.html#stream
 # OGG:    http://en.wikipedia.org/wiki/Ogg#File_format
 
-"""Library to read metadata on mp3/flac/mp4/wav/aif/ogg files"""
+"""
+Library to read metadata on mp3/flac/mp4/wav/aif/ogg files
+
+http://code.google.com/p/python-taglib/
+"""
 
 from collections import MutableMapping
 from struct import error as StructError
@@ -57,7 +61,7 @@ try:
 except ImportError:
     Image = None
 
-__version__ = '1.0'
+__version__ = '1.1'
 __author__ = 'Chris Jones <cjones@gruntle.org>'
 
 __all__ = ['ANYITEM', 'BaseDecoder', 'DECODERS', 'DecodeError', 'EncodeError',
