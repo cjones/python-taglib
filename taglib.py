@@ -57,7 +57,7 @@ try:
 except ImportError:
     Image = None
 
-__version__ = '2.4'
+__version__ = '1.0'
 __author__ = 'Chris Jones <cjones@gruntle.org>'
 
 __all__ = ['ANYITEM', 'BaseDecoder', 'DECODERS', 'DecodeError', 'EncodeError',
