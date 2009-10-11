@@ -10,7 +10,7 @@ def main():
     setup(name='taglib',
           author='Chris Jones',
           author_email='cjones@gruntle.org',
-          url='http://gruntle.org/projects/python/taglib/',
+          url='http://code.google.com/p/python-taglib/',
           description='Library to manipulate audio file metadata',
           license='BSD',
           version=__version__,
