@@ -1,0 +1,65 @@
+Installing:
+
+    python setup.py build
+    sudo python setup.py install
+
+
+Example usage:
+
+    import taglib
+    try:
+        tag = taglib.tagopen('somefile.mp3')
+    except taglib.InvalidMedia:
+        print 'no decoder found'
+    tag.genre = u'Alternative'
+    tag['year'] = 1974
+    tag.save('new.mp3')
+    tag.dump(stream=sys.stdout)  # shows formatted metadata
+    other = taglib.tagopen('hugs.m4a')
+    tag.update(other)
+    print tag
+    tag.image = 'someimage.jpg'  # can set a path, open file, or PIL instance
+    tag.clear()
+    tag.save('no-metadata.mp3')
+
+    $ tagdump /path/to/mp3s/
+
+
+Notes:
+
+    * Rewriting tags is only supported for MP3 (ID3) formats.  It saves
+      to a new file rather than trying to write in-place.
+
+    * Supported formats are M4A (mpeg4), MP3 (id3), FLAC (vorbis),
+      OGG (vorbis), and IFF (wav/aiff).
+
+    * You need to install Python Imaging Library (PIL) for image
+      support.
+
+    * Metadata objects returned by tagopen() behave like a dictionary
+      and implement all related functions.  You may also access the
+      metadata fields as attributes.
+
+    * Access to known fields return None if they are not set (you will
+      never get an AttributeError or KeyError for these fields)
+
+    * When setting metadata attributes, ValidationError is raised if you
+      attempt to set an invalid value.
+
+    * ID3 is not a comprehensive implementation of every available
+      field.  It only supports a subset of tags, namely the ones that
+      iTunes uses to store metadata.  These tags are:
+
+      album, album artist, artist, bpm, comment, compilation, composer, disk, encoder, gapless, genre, grouping, image, lyrics, name, sort album, sort album artist, sort artist, sort composer, sort name, sort video show, track, video description, video episode, video episode id, video season, video show, volume, year,
+
+
+Contact:
+
+    email: Chris Jones <cjones@gruntle.org>
+    aim: seejayunderscore
+
+
+License:
+
+    BSD
+
