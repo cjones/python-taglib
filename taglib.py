@@ -36,11 +36,31 @@
 # Vorbis: http://www.xiph.org/vorbis/doc/v-comment.html
 # FLAC:   http://flac.sourceforge.net/format.html#stream
 # OGG:    http://en.wikipedia.org/wiki/Ogg#File_format
+#
+# TODO:
+#       1. save() methods for other formats besides MP3/ID3.
+#       2. possibly find a way to rewrite ID3 tags in-place when there
+#          is sufficient padding to do so.
+#       3. possibly provide a mechanism to store all unsupported ID3
+#          tags so that they can be written back unmolested, rather than
+#          throwing them out.
+#       4. not sure if the rva/rva2 decoder is implemented
+#          properly... needs more rigorous testing.  It seems like maybe
+#          iTunes uses these two tags completely differently and just
+#          multiplying the rva2 value by a static factor doesn't work
+#          consistently.  that said, if this is not done right
+#          currently, my feelings can be summed up thusly:
+#
+#          CARE-O-METER: |....o...................................|
 
 """
-Library to read metadata on mp3/flac/mp4/wav/aif/ogg files
+Library to read metadata on mp3/flac/mp4/wav/aif/ogg files.  Can write
+back updated metadata for mp3/id3.
 
 http://code.google.com/p/python-taglib/
+
+See comments in-file for detailed information on each decoder and a rant
+on the terribleness of ID3v2.
 """
 
 from collections import MutableMapping
@@ -55,28 +75,32 @@ try:
 except ImportError:
     from StringIO import StringIO
 
+# PIL support is required for image parsing.  I did this because I found
+# many image attachments (especially in ID3) to be hopelessly corrupt,
+# so this at least ensures you don't write back garbage, and keeps the
+# attributes from being full of large binary data in a string.
 try:
     from PIL import Image
     from PIL.ImageFile import ImageFile
 except ImportError:
     Image = None
 
-__version__ = '1.1'
+__version__ = '1.2'
 __author__ = 'Chris Jones <cjones@gruntle.org>'
+__all__ = ['tagopen']
 
-__all__ = ['ANYITEM', 'BaseDecoder', 'DECODERS', 'DecodeError', 'EncodeError',
-           'FLAC', 'FlexOpen', 'GENRES', 'IFF', 'InvalidMedia', 'M4A', 'MP3',
-           'MetadataContainer', 'OGG', 'TaglibError', 'ValidationError',
-           'VorbisComment', 'tagopen']
+#################
+### CONSTANTS ###
+#################
 
-ANYITEM = -1  # use as key for managed dict items to get anything
+ANYITEM = -1  # use as key for managed dict items when key is unknown
 MAXJUNK = 65536  # maximum junk tolerated when seeking an mp3 frame
 BLOCKSIZE = 4096  # size of buffered I/O
 RVA2FACTOR = 33153.0 / 3135  # multiplier for volume adjustment
 GAPLESS = u'iTunPGAP'  # comment key for id3v2 comments
 ENCODING = sys.getfilesystemencoding()  # default output encoding
 
-# flags
+# flags to keep the code somewhat readable
 (ATOM_CONTAINER1, ATOM_CONTAINER2, ATOM_DATA, BOOL, DICT, GENRE,
  IDICT, IMAGE, INT32, TEXT, UINT16, UINT16X2, UINT32) = xrange(13)
 
@@ -114,15 +138,20 @@ TYPES = {'_comment': DICT,
          'volume': INT32,
          'year': UINT16}
 
+# handy list of public metadata attributes
+ATTRS = [key for key in TYPES.keys() if not key.startswith('_')]
+
 # attributes present in id3v1 tag
 ID3V1FIELDS = ['name', 'artist', 'album', 'year', 'comment', 'track', 'genre']
 
-# tags for id3v2.2
+# tags for id3v2.2 that we can encode
 ID3V2TAGS = ['TSC', 'TSA', 'TST', 'COM', 'TSP', 'RVA', 'TEN', 'PIC', 'TCP',
              'TCO', 'TCM', 'TP2', 'TP1', 'TAL', 'TRK', 'TPA', 'TT3', 'TT2',
              'TT1', 'ULT', 'TYE', 'TBP', 'TS2']
 
-# map of id3v2 tags to attributes
+# map of id3v2 tags to attributes. this is NOT comprehensive,
+# and some of these aren't even in the spec.  please see the rather
+# lengthy rant in the MP3 class for my take on ID3.
 ID3TAGS = {'APIC': '_image',
            'COM': '_comment',
            'COM ': '_comment',
@@ -214,7 +243,7 @@ ENCODINGS = {'\x00': ('latin-1', '\x00'),
              '\x02': ('utf-16-be', '\x00\x00'),
              '\x03': ('utf-8', '\x00')}
 
-# map of type id's to attributes for IFF formats
+# map of type id's to attributes for IFF formats. not comprehensive.
 IFFIDS = {'ANNO': 'comment',
           'AUTH': 'artist',
           'IART': 'artist',
@@ -225,7 +254,9 @@ IFFIDS = {'ANNO': 'comment',
           'ISFT': 'encoder',
           'NAME': 'name'}
 
-# map of mpeg4 atoms to atom type/attribute
+# map of mpeg4 atoms to atom type/attribute. not comprehensive list of
+# possible atoms, just the ones iTunes used when I made a point of
+# filling out every single metadata field.
 ATOMS = {'moov': (ATOM_CONTAINER1, None),
          'moov.udta': (ATOM_CONTAINER1, None),
          'moov.udta.meta': (ATOM_CONTAINER2, None),
@@ -260,7 +291,11 @@ ATOMS = {'moov': (ATOM_CONTAINER1, None),
          'moov.udta.meta.ilst.\xa9too': (ATOM_DATA, 'encoder'),
          'moov.udta.meta.ilst.\xa9wrt': (ATOM_DATA, 'composer')}
 
-# pre-defined id3v1 genres according to winamp/mediasoft
+# pre-defined genres according to winamp/mediasoft.  This is a bit
+# of retardation that started out with ID3v1 tags and has been
+# propagated in the ID3v2 spec as well as iTunes MP4.  All formats
+# support free-form genres if it doesn't match up with this list except
+# for id3v1.
 GENRES = ['Blues', 'Classic Rock', 'Country', 'Dance', 'Disco', 'Funk',
           'Grunge', 'Hip-Hop', 'Jazz', 'Metal', 'New Age', 'Oldies', 'Other',
           'Pop', 'R&B', 'Rap', 'Reggae', 'Rock', 'Techno', 'Industrial',
@@ -301,7 +336,9 @@ GENRES = ['Blues', 'Classic Rock', 'Country', 'Dance', 'Disco', 'Funk',
           None, None, None, None, None, None, None, None, None, None, None,
           None]
 
-# map of vorbis tags to attributes
+# map of vorbis tags to attributes.  VorbisComment is a free-form
+# key/value mapping with no standard for what keys should be used, so
+# the following list is just a bunch of POSSIBLE fields.
 VORBISTAGS = {'album': 'album',
               'album artist': 'album_artist',
               'album_artist': 'album_artist',
@@ -410,6 +447,10 @@ DISPLAY = [('Info',
              ('Encoder', 'encoder'),
              ('Lyrics', 'lyrics')))]
 
+#########################
+### EXCEPTION CLASSES ###
+#########################
+
 class TaglibError(Exception):
 
     """Base taglib error"""
@@ -435,46 +476,27 @@ class InvalidMedia(TaglibError):
     """Raised if media format is invalid"""
 
 
+#########################
+### META DATA CLASSES ###
+#########################
+
+
 class MetadataContainer(MutableMapping):
 
     """Metadata container that maps attributes to dictionary keys"""
+
+    # the upshot to this class is that the metadata object returned
+    # is more flexible than just returning a dictionary.  it will
+    # validate the attributes when set to keep data sane, allow you to
+    # refer to unset attributes without throwing an AttributeError, and
+    # shows metadata in the repr().  It also allows everything to be
+    # referred to as either a dictionary OR as instance attributes.
 
     types = {}
 
     def __init__(self, *args, **kwargs):
         """Accepts same arguments as dict()"""
         self.__dict__.update(dict(*args, **kwargs))
-
-    def getdict(self, attr, key):
-        """Get managed dict item"""
-        dict = self[attr]
-        if dict:
-            if key == ANYITEM:
-                key = sorted(dict)[0]
-            return dict.get(key)
-
-    def setdict(self, attr, key, val):
-        """Set managed dict item"""
-        if val is None:
-            self.deldict(attr, key)
-        else:
-            dict = self[attr]
-            if not dict:
-                dict = self[attr] = {}
-            dict[key] = val
-
-    def deldict(self, attr, key):
-        """Delete managed dict item"""
-        dict = self[attr]
-        if dict:
-            if key == ANYITEM:
-                key = sorted(dict)[0]
-            try:
-                del dict[key]
-                if not dict:
-                    self[attr] = None
-            except KeyError:
-                pass
 
     def __getattribute__(self, key):
         """Safe attribute access"""
@@ -495,6 +517,8 @@ class MetadataContainer(MutableMapping):
 
     def __delattr__(self, key):
         """Safe attribute delete"""
+        if key in self.types:
+            self.validate(None, self.types[key])
         try:
             super(MetadataContainer, self).__delattr__(key)
         except AttributeError:
@@ -535,63 +559,11 @@ class MetadataContainer(MutableMapping):
         return val
 
 
-class FlexOpen(object):
+class Metadata(MetadataContainer):
 
-    """Flexible open context that accepts path, descriptor, or fileobj"""
-
-    def __init__(self, file, mode='rb', close=True):
-        """
-        file    - a path, descriptor, or fileobj
-        mode    - mode to open with (does not apply to fileobj's)
-        close   - if a path is provided, whether to close when done
-        """
-        if isinstance(file, basestring):
-            self.fp = open(file, mode)
-            self.external = False
-        elif isinstance(file, (int, long)):
-            self.fp = os.fdopen(file, mode)
-            self.external = True
-        elif hasattr(file, 'seek'):
-            self.fp = file
-            self.external = True
-        else:
-            raise TypeError('file must be a path, descriptor, or fileobj')
-        self.close = close
-
-    def __enter__(self):
-        """Enter open context"""
-        if self.external:
-            self.pos = self.fp.tell()
-        return self.fp
-
-    def __exit__(self, *args):
-        """Exit open context"""
-        if self.external:
-            self.fp.seek(self.pos, os.SEEK_SET)
-        elif self.close:
-            self.fp.close()
-
-
-class BaseDecoder(MetadataContainer):
-
-    """Base decoder class"""
+    """Generic result object"""
 
     types = TYPES
-    format = None
-    close = True
-
-    def __init__(self, file, offset=0):
-        """
-        file    - path, descriptor, or fileobj
-        offset  - position to start decoding
-        """
-        with FlexOpen(file, 'rb', self.close) as fp:
-            try:
-                self.decode(fp, offset)
-            except SafeErrors, error:
-                raise InvalidMedia(error)
-            if not self.close:
-                self.fp = fp
 
     @property
     def image_sample(self):
@@ -601,10 +573,6 @@ class BaseDecoder(MetadataContainer):
             val = StringIO()
             image.save(val, image.format)
             return val.getvalue()[:512], image.format, image.size
-
-    def decode(self, fp, offset=0):
-        """Decode open file starting at offset"""
-        raise DecodeError('not implemented')
 
     def dump(self, width=72, stream=None, filename=None, encoding=None):
         """Dump metadata to stream (default STDOUT)"""
@@ -679,6 +647,93 @@ class BaseDecoder(MetadataContainer):
         if result is NotImplemented:
             return result
         return not result
+
+    @staticmethod
+    def validate(val, type):
+        raise ValidationError('read-only')
+
+
+################
+### DECODERS ###
+################
+
+
+class FlexOpen(object):
+
+    """Flexible open context that accepts path, descriptor, or fileobj"""
+
+    # pretty self-explanatory.  I found the open() method a little
+    # inflexible.  Using this instead is more duck-type-ish.  For
+    # example, when setting obj.image, you can give it a path to a file,
+    # an already open file, a StringIO object, etc.  It also keeps track
+    # of the seek position if the file is external and go back to its
+    # original spot when the context exits, or can be instructed to NOT
+    # close the file when it's done, which is handy for keeping the
+    # original object open for future read/write.
+
+    def __init__(self, file, mode='rb', close=True):
+        """
+        file    - a path, descriptor, or fileobj
+        mode    - mode to open with (does not apply to fileobj's)
+        close   - if a path is provided, whether to close when done
+        """
+        if isinstance(file, basestring):
+            self.fp = open(file, mode)
+            self.external = False
+        elif isinstance(file, (int, long)):
+            self.fp = os.fdopen(file, mode)
+            self.external = True
+        elif hasattr(file, 'seek'):
+            self.fp = file
+            self.external = True
+        else:
+            raise TypeError('file must be a path, descriptor, or fileobj')
+        self.close = close
+
+    def __enter__(self):
+        """Enter open context"""
+        if self.external:
+            self.pos = self.fp.tell()
+        return self.fp
+
+    def __exit__(self, *args):
+        """Exit open context"""
+        if self.external:
+            self.fp.seek(self.pos, os.SEEK_SET)
+        elif self.close:
+            self.fp.close()
+
+
+class BaseDecoder(Metadata):
+
+    """Base decoder class"""
+
+    # implements methods shared by all decoders but doesn't
+    # do anything useful on its own.
+
+    format = None
+    close = True
+
+    def __init__(self, file, offset=0):
+        """
+        file    - path, descriptor, or fileobj
+        offset  - position to start decoding
+        """
+        with FlexOpen(file, 'rb', self.close) as fp:
+            try:
+                self.decode(fp, offset)
+            except SafeErrors, error:
+                raise InvalidMedia(error)
+            if not self.close:
+                self.fp = fp
+
+    def decode(self, fp, offset=0):
+        """Decode open file starting at offset"""
+        raise DecodeError('not implemented')
+
+    def save(self, file):
+        """Save to file with updated metadata"""
+        raise EncodeError('not suppported for %s format' % self.format)
 
     @staticmethod
     def getbufread(fp, size=None, blocksize=None):
@@ -814,10 +869,187 @@ class MP3(BaseDecoder):
 
     """Decodes ID3v1/ID3v2 tags on MP3 files"""
 
+    # A rant on this decoder to developers:
+    #
+    # ID3V2 IS THE WORST FUCKING THING IN THE WORLD. OH MY GOD.
+    #
+    # Not sure what else I can say about this.  It is complicated,
+    # convoluted, and insufficiently outlines its exact implementation
+    # in many places.  It is curiously over-engineered in areas of
+    # questionable usefulness while totally lacking in critical ones.  I
+    # am fairly certain the author of ID3v2 is on lots of speed,
+    # clinically insane, or both.
+    #
+    # The result is that various applications that read/write ID3V2 tags
+    # are, at best, interpretations of the spec.  Parts of it are
+    # outright ignored, some add their own "custom" fields, some stuff
+    # is just plain wrong.
+    #
+    # This decoder was developed partly using the spec on id3.org,
+    # partly using iTunes interpretation of ID3v2, and partly by running
+    # this across my ~30G library and correcting for any problems it
+    # encountered, while chucking out metadata fields I deemed useless.
+    #
+    # I originally flirted with the idea of just stashing the contents
+    # of unsupported tags somewhere so that they could be written back
+    # unmolested, and may do that in the future, or make it an option.
+    # I remain unconvinced this is worth the effort.
+    #
+    # Some stuff I REFUSE to implement, in no particular order:
+    #
+    # - The ability to define 20 different URL's (W___ frames).  How is
+    #   this useful?  I mean, who cares?  Look it up on google ffs.
+    #   These are just text fields and no problem to add to the code, I
+    #   am just not doing it because it's fucking stupid.  In my own
+    #   library, the files that used these are full of links that are
+    #   404 now, which is another problem with storing URLs in the
+    #   metadata.
+    #
+    # - Externally import tags from other files by reference.  That is
+    #   just INSANE.  The whole point of metadata on a file is so that
+    #   it follows the file around wherever it goes.  Pointing the metadata
+    #   TO ANOTHER FILE defeats the whole purpose.
+    #
+    # - Nearly every frame that defines how the actual MP3 data should
+    #   be played back, like reverb, equalization, recommended buffer
+    #   size, seek points, etc.  This makes no sense to store on the file,
+    #   is very complicated, and in not honored by any mp3 player I know
+    #   of.  The one exception I made to this is the "volume adjustment"
+    #   field (RVAD/RVA/RVA2).  This is fairly useful and iTunes does make
+    #   use of it.  However I do not honor the full spec which allows
+    #   separate settings for different channels.  This decoder only looks
+    #   for the first volume adjustment specified and uses that.  When
+    #   writing back, it will save that adjustment in the tag for both the
+    #   right and left channel.  Peak value field is ignored completely.
+    #   This is, as far as I can tell, how iTunes uses the tag anyway.
+    #   That is, its volume slider effects both channels, and are stored
+    #   that way on the tag.  Sorry if your player works differently.
+    #   Implementing this feature completely isn't very hard, I just
+    #   didn't see the point.  My mind could be changed on this matter
+    #   if anyone cared to make a case.
+    #
+    # - Any fields pertaining to copyright/terms of use/ownership.  Show
+    #   me one person who cares about this and I'll eat my hat.  I don't
+    #   even wear a hat, so I'll go buy one for this occasion.  Chances
+    #   are if you have an MP3 file that you didn't rip yourself, it's
+    #   pirated anyway, so what use is keeping track of who you ripped
+    #   off?  :P
+    #
+    # - Fields which allow arbitrary binary objects to be attached (e.g.
+    #   the GEOB tag).  What kind of binary object would be useful to
+    #   attach to an MP3 besides an image file, which already has its
+    #   own frame?!  The spec addresses the how, but not the WHY.
+    #
+    # - ANY HEADER FLAGS WHATSOEVER.  This includes:
+    #
+    #   * Encryption (WTF? WHY WOULD YOU WANT TO ENCRYPT METADATA?!)
+    #
+    #   * Repacking tag on the fly to make it "syncsafe". As if there's
+    #     any functional MP3 decoder that can't tell a valid MP3 frame
+    #     from a stray 11bit syncword.  Maybe this was useful at some
+    #     point, but it's just pointless now.  Still, I note that some
+    #     very old files in my MP3 library have this flag set.  My
+    #     decoder just ignores it.  There is only one case I can think
+    #     of where a syncword would show up in a field, and that is in
+    #     an attached image file.  So, I'm sorry, you'll lose the image
+    #     field trying to decode these if the ID3 tag marks it syncsafe.
+    #     I didn't find many that do this except for very old MP3s.  I
+    #     think it's worth the loss just to avoid complicating the code
+    #     further.
+    #
+    #   * CRC-checks.  Look, if an ID3 tag is corrupted, you'll figure
+    #     that out pretty quickly while trying to read the damn thing.
+    #
+    #   * Frame-specific flags that define whether a particular frame
+    #     should be chucked when the tag is updated.  They implemented
+    #     this because they knew a tag that, for example, contained the
+    #     filesize would become bogus if you changed any other part of the
+    #     tag.  The solution to this is not store volatile information
+    #     like filesize in the tag at all, not provide a workaround.
+    #     You can figure out the filesize by, you know, LOOKING AT HOW
+    #     BIG THE FILE IS, which is a less expensive operation than
+    #     decoding an ID3 tag by far.
+    #
+    #   * Extended headers and the "footer" field.  I couldn't find a
+    #     single file in my library that contained these, and my library
+    #     is, I think, a pretty representative sample of encoders in use
+    #     over the past decade.  The fact that the extended header is
+    #     full of useless shit like "tag restrictions", I can see why no
+    #     one bothered with it.  Good riddance.
+    #
+    # I could go on and on about how terrible ID3v2 is.  It just defies
+    # imagination.  I am SO SO SORRY if you are reading this because you
+    # are writing your own ID3v2 encoder.  My honest advice is to not
+    # bother unless you hate yourself like I do.  TURN BACK BEFORE IT'S
+    # TOO LATE!
+
     format = 'mp3'
     close = False
     genre_re = re.compile(r'^\((\d+)\)$')
     ptype_re = re.compile(r'[\x00-\x14]')
+
+    ######################################
+    ### managed-dict related functions ###
+    ######################################
+
+    # following functions are to deal with the fact that
+    # several ID3v2 tags can have multiple versions with different
+    # "content descriptions" or languages.  even though I think this is
+    # a retarded idea, it needs to be implemented in some capacity,
+    # otherwise I'd have to throw out some important metadata like
+    # comments, lyrics, artwork, etc.  iTunes, at least, uses the
+    # comment field with different content keys to store data for which
+    # there is no id3v2-defined tag (such as gapless playback).
+    #
+    # that said, these fields are implemented as properties so that they
+    # behave like the other decoders when accessed.  If you need to get
+    # to a specific comment or lyric that ISN'T english with the content
+    # description empty, you will need to call get_comment or get_lyrics
+    # with the appropriate keyword arguments.  If you copy this metadata
+    # to another decoder class that doesn't support multiple values,
+    # all of these will be lost except for the english+empty-descriptor
+    # and the gapless playback setting itunes uses.
+    #
+    # one other thing to note:  Any of these can be called with the
+    # ANYITEM keyword, which will return any item it finds.  If you have
+    # more than one, this is kind of arbitrary.  The reason I do this is
+    # because some stuff (especially attached images) have
+    # unexpected/arbitrary keys, so this lets you say "I don't care what
+    # key they used, JUST GIVE ME AN IMAGE."
+    #
+    # one possible change here is to make it default to this behavior if
+    # and only if it couldn't find the named one.
+
+    def getdict(self, attr, key):
+        """Get managed dict item"""
+        dict = self[attr]
+        if dict:
+            if key == ANYITEM:
+                key = sorted(dict)[0]
+            return dict.get(key)
+
+    def setdict(self, attr, key, val):
+        """Set managed dict item"""
+        if val is None:
+            self.deldict(attr, key)
+        else:
+            dict = self[attr]
+            if not dict:
+                dict = self[attr] = {}
+            dict[key] = val
+
+    def deldict(self, attr, key):
+        """Delete managed dict item"""
+        dict = self[attr]
+        if dict:
+            if key == ANYITEM:
+                key = sorted(dict)[0]
+            try:
+                del dict[key]
+                if not dict:
+                    self[attr] = None
+            except KeyError:
+                pass
 
     def get_image(self, key=ANYITEM):
         """Get named image (default: any)"""
@@ -919,6 +1151,13 @@ class MP3(BaseDecoder):
 
     mp3data = property(get_mp3data)
 
+    ##################################
+    ### decoding-related functions ###
+    ##################################
+
+    # first we decode id3v1, if it exists, then id3v2, which can
+    # override these values, since it's a more comprehensive spec.
+
     def decode(self, fp, offset=0):
         """Decodes ID3v1/ID3v2 tags on open MP3 file"""
         try:
@@ -959,6 +1198,13 @@ class MP3(BaseDecoder):
 
     def decode_id3v2(self, fp, offset=0):
         """Decode ID3v2 tag"""
+
+        # note: some of the decoding legwork is handled by the
+        # validate() method in BaseDecoder, such as converting the
+        # pre-defined GENRE index to the actual genre or parsing the
+        # '3/4' syntax for track number. also see the static helper
+        # functions at the end of this class.
+
         try:
             fp.seek(offset, os.SEEK_SET)
         except IOError:
@@ -977,10 +1223,18 @@ class MP3(BaseDecoder):
                 taglen, sizelen, flagslen, syncsafe = 4, 4, 2, True
             else:
                 raise DecodeError('unknown version: %d' % version)
-            if revision:
-                raise DecodeError('unknown revision: %d' % revision)
-            if flags:
-                raise DecodeError('unknown flags: %d' % flags)
+
+            # XXX getting all pissy about these two fields is probably
+            # not worth it.  In theory, revision SHOULD be 0 (because
+            # the spec says so) and flags SHOULD be 0 (since I don't
+            # implement any of the behavior they define).  In reality,
+            # we can just try to decode anyway and hope for the best.
+            #
+            # if revision:
+            #     raise DecodeError('unknown revision: %d' % revision)
+            # if flags:
+            #     raise DecodeError('unknown flags: %d' % flags)
+
         except SafeErrors:
             fp.seek(offset, os.SEEK_SET)
             raise
@@ -988,11 +1242,19 @@ class MP3(BaseDecoder):
         while read.state['size']:
             try:
                 tag = read(taglen)
+                # XXX should we check for padding and stop?  it doesn't
+                # really hurt to keep parsing as it'll eventually hit
+                # the end, but it's wasted cycles.  ignoring the padding
+                # and pushing blithely ahead might allow us to recover
+                # from corrupted tags and salvage some metadata.  in
+                # any case, the cycles saved by giving up will probably
+                # just be shifted to the seekmp3 function called right
+                # after.
                 size = self.getint(read(sizelen), syncsafe)
                 flags = self.getint(read(flagslen))
                 attr = ID3TAGS.get(tag)
                 if not attr:
-                    read(size)
+                    read(size)  # skip ahead but don't store it
                     raise DecodeError('unknown tag: %s' % tag)
                 val = read(size)
                 if not val:
@@ -1011,6 +1273,8 @@ class MP3(BaseDecoder):
                     if key[1] == GAPLESS:
                         val = self.validate(val, BOOL)
                 elif type == GENRE:
+                    # id3v2 can reference to the id3v1 pre-defined genres by
+                    # storing (20) or whatever.
                     try:
                         val = int(self.genre_re.search(val).group(1))
                     except AttributeError:
@@ -1026,6 +1290,9 @@ class MP3(BaseDecoder):
                     key = (self.validate(self.getstr(ebyte + key), TEXT),)
                     val = self.validate(StringIO(val), IMAGE), ptype
                 elif type == INT32:
+                    # limited implementation of volume adjustment tag.
+                    # see the rant at the top of this class for an
+                    # explanation why I didn't fully implement it.
                     if tag == 'RVA':
                         pos, bits = ord(val[0]) & 1, ord(val[1])
                         i, r = divmod(bits, 8)
@@ -1047,12 +1314,18 @@ class MP3(BaseDecoder):
                 pass
         fp.seek(read.state['pos'], os.SEEK_SET)
 
+
+    ##################################
+    ### encoding-related functions ###
+    ##################################
+
     def save(self, file):
         """Save mp3 with updated metadata to file"""
         if not self.has_mp3data:
             raise EncodeError('no mp3 data')
         with FlexOpen(file, 'wb') as fp:
             self.encode(fp)
+        # return fp so we can do tagopen(obj.save(StringIO()))  :P
         return fp
 
     def encode(self, fp):
@@ -1096,6 +1369,11 @@ class MP3(BaseDecoder):
             size += len(val)
         pos = fp.tell()
         try:
+            # go back and rewrite the size header now that we know what
+            # it is.  The piece of bitwise nastiness below is an
+            # implementation of the "syncsafe" format.  This was the
+            # least computationally expensive way I could find to
+            # convert an integer to syncsafe bits
             fp.seek(head + 6)
             size = unpack('4B', pack('>L', size))
             fp.write(pack('4B',
@@ -1176,11 +1454,16 @@ class MP3(BaseDecoder):
             except SafeErrors:
                 pass
 
+    #####################################################################
+    ### various useful static methods specific to ID3 or MP3 decoding ###
+    #####################################################################
+
     @staticmethod
     def getint(val, syncsafe=False):
-        """Convert bytes to integer"""
+        """Unpack bytes to integer, honoring the awful "syncsafe" algorithm"""
         val = unpack('>L', '\x00' * (4 - len(val)) + val)[0]
         if syncsafe:
+            # see the encode_id3v2() function for how to do this in reverse
             val = (((val & 0x0000007f) >> 0) | ((val & 0x00007f00) >> 1) |
                    ((val & 0x007f0000) >> 2) | ((val & 0x7f000000) >> 3))
         return val
@@ -1193,7 +1476,7 @@ class MP3(BaseDecoder):
 
     @staticmethod
     def mkstr(val, utf16=False):
-        """Encode ID3v2 text field"""
+        """Encode ID3v2 text field, only use utf-16 if necessary or forced"""
         if val is None:
             val = u''
         if not utf16:
@@ -1242,10 +1525,11 @@ class MP3(BaseDecoder):
             sample = fp.read(samplesize)
             i = 0
             while i < len(sample) - 3:
-                i = sample.find('\xff', i)
+                i = sample.find('\xff', i)  # skip ahead to possible syncword
                 if i == -1:
                     raise DecodeError('no syncword found')
                 try:
+                    # see note in head_check() for what's going on here
                     next = i + cls.head_check(sample[i:i + 4])
                     cls.head_check(sample[next:next + 4])
                     pos += i
@@ -1259,6 +1543,25 @@ class MP3(BaseDecoder):
     @staticmethod
     def head_check(head):
         """Return frame length if 4-byte value is an MP3 header"""
+
+        # a note about this function:  I found the mpg123 head_check to
+        # be insufficient and easily confused about what a valid MP3
+        # frame is.  this is a bit more rigourous in that it calculates
+        # the expected frame size and looks ahead to see if a valid mp3
+        # frame follows immediately after, which you'd expect if it's a
+        # valid MP3 file.  However, since this is not implementing an
+        # MP3 decoder in its entirety, it's possible to get this wrong
+        # for incorrectly encoded MP3s, where a robust player can
+        # probably deal with it transparently.  so it goes.  I tested
+        # this on a pretty large library and it only choked on a handful
+        # of files, all of which were the uncommon version 2/layer 3
+        # format.  I ran these through mplayer with debug level high,
+        # and although it was able to play them, it encountered errors
+        # every frame.  My honest recommendation is to re-encode these
+        # in LAME with -V0 rather than making this function more robust,
+        # as it's already pretty complicated.  Decoding broken MP3's is
+        # way outside the scope of this library.
+
         head = unpack('>L', head)[0]
         if head & 0xffe00000 != 0xffe00000:
             raise DecodeError('no syncword')
@@ -1293,6 +1596,18 @@ class IFF(MP3):
 
     """Decodes metadata on RIFF/AIFF files"""
 
+    # The reason this subclasses MP3 is because IFF can
+    # act as a container for MP3 data or also attach ID3V2
+    # tags to arbitrary media such as Microsoft WAV.  If it
+    # finds an MPEG.data chunk that contains actual MP3 data,
+    # calling save() will write an actual MP3 file rather than
+    # a RIFF/AIFF file.
+    #
+    # Furthermore note that this can decode metadata on AVI
+    # files which are just RIFF's, although they typically
+    # don't have any useful metadata outside of what encoder was used,
+    # like VirtualDub, transcode, etc.
+
     format = 'iff'
 
     def decode(self, fp, offset=0):
@@ -1310,6 +1625,8 @@ class IFF(MP3):
             fp.seek(pos, os.SEEK_SET)
             id = fp.read(4)
             if fmt is None:
+                # the only difference between AIFF and RIFF is the
+                # endianess of the size field and the first typeID.
                 if id == 'RIFF':
                     fmt = '<L'
                 elif id in ('FORM', 'LIST', 'CAT '):
@@ -1342,6 +1659,21 @@ class M4A(BaseDecoder):
 
     """Decodes atom metadata on M4A/MP4 files"""
 
+    # This decoder can walk any mpeg4 file but only
+    # knows about the atoms relevant to apple's AAC or lossless format.
+    # This could be extended by updating the ATOMS if anyone is so
+    # inclined..
+
+    # One thing it doesn't do is parse the '----' atom, which behaves
+    # like a dictionary for storing arbitrary fields.  I'm unclear as to
+    # why apple did this when they are in control of the
+    # moov.udta.meta.ilst specification.   taglib used to support this
+    # field, which made the decoder twice as complicated, so I tossed it
+    # out.  I couldn't find any documentation on what data stored there
+    # is, but it looked like information about the encoding parameters
+    # used for the actual audio data.  Since the codec in use is
+    # entirely closed by apple, I see no use for this metadata.
+
     format = 'm4a'
 
     def decode(self, fp, offset=0):
@@ -1370,6 +1702,13 @@ class M4A(BaseDecoder):
                 if tag not in ATOMS:
                     raise DecodeError('unsupported atom: %s' % tag)
                 atom, attr = ATOMS[tag]
+                # for some reason, some "container" atoms have an extra
+                # 4 NULL bytes which should be accounted for when
+                # seeking.  I label these atoms CONTAINER2.  I'm not
+                # sure what purpose these serve, perhaps they are
+                # 64bit atom sizes?  I'm pretty sure if you have a 4G
+                # audio file, you have more problems to worry about than
+                # reading the metadata, so I just ignore these bytes.
                 if atom == ATOM_CONTAINER1:
                     self.decode_atoms(fp, pos + 8, pos + size, path)
                 elif atom == ATOM_CONTAINER2:
@@ -1402,7 +1741,11 @@ class M4A(BaseDecoder):
 
 class VorbisComment(BaseDecoder):
 
-    """Providers decoder for VorbisComment tag"""
+    """Provides decoder for VorbisComment tag"""
+
+    # this decoder isn't meant to be used standalone, but to be
+    # subclassed by formats that have the Vorbis Comment metadata
+    # embedded.  Both FLAC and OGG do this.
 
     def decode_vorbis(self, fp, size):
         """Decode VorbisComment"""
@@ -1423,6 +1766,8 @@ class VorbisComment(BaseDecoder):
 class FLAC(VorbisComment):
 
     """Decodes VorbisComment on FLAC files"""
+
+    # Not much to say here.  FLAC is VERY simple to parse.  YAY!
 
     format = 'flac'
 
@@ -1448,6 +1793,15 @@ class FLAC(VorbisComment):
 class OGG(VorbisComment):
 
     """Decodes VorbisComment on OGG files"""
+
+    # Like FLAC, OGG is very straightforward to decode.  The whole
+    # segments/packets construct is a little awkward compared to FLAC,
+    # but easy enough to implement sufficiently to get to the metadata
+    # page.  I'm not sure it's implemented sufficiently for anything
+    # more than that though, so don't rely on this function if you are
+    # writing code meant to parse the OGG files themselves.  I didn't
+    # want to spend a lot of time on this since OGG is a relatively
+    # obscure format, just get to the metadata reliably.
 
     format = 'ogg'
 
@@ -1476,17 +1830,41 @@ class OGG(VorbisComment):
                 break
 
 
-def tagopen(file, offset=0):
-    """Open file and decode metadata starting at offset"""
-    for cls in DECODERS:
+def tagopen(file, readonly=True):
+    """
+    Open file and decode metadata
+
+    The default is to open read-only, which prevents changing attributes
+    and does not provide a save() method.  Setting this to False will
+    return the metadata with full encoder/decoder methods and allow you
+    to update the metadata before re-encoding.
+    """
+    for decoder in DECODERS:
         try:
-            return cls(file, offset)
+            obj = decoder(file)
+            if readonly:
+                return Metadata(obj)
+            return obj
         except InvalidMedia:
             pass
     raise InvalidMedia('no suitable decoder found')
 
 
+# a list of valid decoders
 DECODERS = FLAC, M4A, OGG, IFF, MP3
+
+# these are all the errors one might encounter while decoding
+# that should not result in a fatal error.  in a perfect world, every
+# tag would be perfect, but the reality is that many are
+# corrupted/implemented incorrectly.  Catching these exceptions means
+# the metadata it was able to read before blowing up doesn't get lost.
+# Like how browsers parse HTML, it's the "better than nothing"
+# principle.  Put another way, there's no use being a stickler for
+# standards when the standards are so shitty no one implements them
+# correctly or consistently.  If a decoder fails miserably in every way,
+# an InvalidMedia exception will be raised, which is cleaner to catch in
+# the caller.
 
 SafeErrors = (IOError, OSError, EOFError, StructError,
               ValidationError, DecodeError, EncodeError)
+
