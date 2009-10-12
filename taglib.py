@@ -60,10 +60,16 @@ See comments in-file for detailed information on each decoder and a rant
 on the terribleness of ID3v2.
 """
 
+from __future__ import with_statement
+import sys
+
+if sys.hexversion < 0x02060200:
+    print >> sys.stderr, 'Sorry, Python 2.6 is required'
+    sys.exit(0)
+
 from collections import MutableMapping
 from struct import error as StructError
 from struct import pack, unpack
-import sys
 import os
 import re
 
