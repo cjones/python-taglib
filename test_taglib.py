@@ -16,7 +16,7 @@ import sys
 import os
 
 from taglib import (tagopen, StringIO, DICT, IDICT, TYPES,
-                    IMAGE, InvalidMedia, __version__)
+                    LIST, IMAGE, InvalidMedia, __version__)
 
 # initialize root logger
 log.basicConfig(level=log.INFO, format='%(levelname)s> %(message)s')
@@ -180,7 +180,7 @@ def test(file):
     except Exception, error:
         return errors + ['could not reopen: %s' % error]
     for attr, type in TYPES.iteritems():
-        if type in (DICT, IDICT):
+        if type in (DICT, IDICT, LIST):
             continue
         if type == IMAGE:
             val1, val2 = src.image_sample, dst.image_sample
