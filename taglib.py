@@ -41,10 +41,7 @@
 #       1. save() methods for other formats besides MP3/ID3.
 #       2. possibly find a way to rewrite ID3 tags in-place when there
 #          is sufficient padding to do so.
-#       3. possibly provide a mechanism to store all unsupported ID3
-#          tags so that they can be written back unmolested, rather than
-#          throwing them out.
-#       4. not sure if the rva/rva2 decoder is implemented
+#       3. not sure if the rva/rva2 decoder is implemented
 #          properly... needs more rigorous testing.  It seems like maybe
 #          iTunes uses these two tags completely differently and just
 #          multiplying the rva2 value by a static factor doesn't work
@@ -102,12 +99,13 @@ ENCODING = sys.getfilesystemencoding()  # default output encoding
 
 # flags to keep the code somewhat readable
 (ATOM_CONTAINER1, ATOM_CONTAINER2, ATOM_DATA, BOOL, DICT, GENRE,
- IDICT, IMAGE, INT32, TEXT, UINT16, UINT16X2, UINT32) = xrange(13)
+ IDICT, IMAGE, INT32, TEXT, UINT16, UINT16X2, UINT32, LIST) = xrange(14)
 
 # map of attributes to data types
 TYPES = {'_comment': DICT,
          '_image': IDICT,
          '_lyrics': DICT,
+         '_unknown': LIST,
          'album': TEXT,
          'album_artist': TEXT,
          'artist': TEXT,
@@ -631,7 +629,7 @@ class Metadata(MetadataContainer):
         if not isinstance(other, BaseDecoder):
             return NotImplemented
         for attr, type in TYPES.iteritems():
-            if type in (DICT, IDICT):
+            if type in (DICT, IDICT, LIST):
                 continue
             if type == IMAGE:
                 val1, val2 = self.image_sample, other.image_sample
@@ -987,6 +985,7 @@ class MP3(BaseDecoder):
     close = False
     genre_re = re.compile(r'^\((\d+)\)$')
     ptype_re = re.compile(r'[\x00-\x14]')
+    tag_re = re.compile(r'^[0-9A-Z ]{3,4}$')
 
     ######################################
     ### managed-dict related functions ###
@@ -1242,23 +1241,19 @@ class MP3(BaseDecoder):
         while read.state['size']:
             try:
                 tag = read(taglen)
-                # XXX should we check for padding and stop?  it doesn't
-                # really hurt to keep parsing as it'll eventually hit
-                # the end, but it's wasted cycles.  ignoring the padding
-                # and pushing blithely ahead might allow us to recover
-                # from corrupted tags and salvage some metadata.  in
-                # any case, the cycles saved by giving up will probably
-                # just be shifted to the seekmp3 function called right
-                # after.
+                if not self.tag_re.search(tag):
+                    read.state['size'] = 0
+                    read.state['pos'] -= len(tag)
+                    raise DecodeError('invalid tag')
                 size = self.getint(read(sizelen), syncsafe)
                 flags = self.getint(read(flagslen))
-                attr = ID3TAGS.get(tag)
-                if not attr:
-                    read(size)  # skip ahead but don't store it
-                    raise DecodeError('unknown tag: %s' % tag)
                 val = read(size)
                 if not val:
                     raise DecodeError('empty value')
+                attr = ID3TAGS.get(tag)
+                if not attr:
+                    self.__dict__.setdefault('_unknown', []).append((tag, val))
+                    raise DecodeError('unknown tag')
                 type = self.types[attr]
                 key = None
                 if type in (BOOL, GENRE, TEXT, UINT16, UINT16X2):
@@ -1319,16 +1314,16 @@ class MP3(BaseDecoder):
     ### encoding-related functions ###
     ##################################
 
-    def save(self, file):
+    def save(self, file, keep_unknown=False):
         """Save mp3 with updated metadata to file"""
         if not self.has_mp3data:
             raise EncodeError('no mp3 data')
         with FlexOpen(file, 'wb') as fp:
-            self.encode(fp)
+            self.encode(fp, keep_unknown)
         # return fp so we can do tagopen(obj.save(StringIO()))  :P
         return fp
 
-    def encode(self, fp):
+    def encode(self, fp, keep_unknown=False):
         """Encode mp3/metadata to open file"""
         id3v1 = id3v2 = False
         for tag in ID3V2TAGS:
@@ -1338,8 +1333,10 @@ class MP3(BaseDecoder):
                 if attr in ID3V1FIELDS:
                     id3v1 = True
                     break
+        if not id3v2 and keep_unknown and self._unknown:
+            id3v2 = True
         if id3v2:
-            self.encode_id3v2(fp)
+            self.encode_id3v2(fp, keep_unknown)
         for val in self.mp3data:
             fp.write(val)
         if id3v1:
@@ -1359,12 +1356,12 @@ class MP3(BaseDecoder):
             val.append('\xff')
         fp.write(''.join(val))
 
-    def encode_id3v2(self, fp):
+    def encode_id3v2(self, fp, keep_unknown=False):
         """Encode ID3v2 tag to open file"""
         head = fp.tell()
         fp.write(pack('>3s3BL', 'ID3', 2, 0, 0, 0))
         size = 0
-        for val in self.id3v2_tags:
+        for val in self.get_id3v2_tags(keep_unknown):
             fp.write(val)
             size += len(val)
         pos = fp.tell()
@@ -1384,14 +1381,12 @@ class MP3(BaseDecoder):
         finally:
             fp.seek(pos, os.SEEK_SET)
 
-    @property
-    def id3v2_tags(self):
+    def get_id3v2_tags(self, keep_unknown=False):
         """Yields encoded ID3v2 tags"""
-        for tag, val in self.id3v2_items:
+        for tag, val in self.get_id3v2_items(keep_unknown):
             yield tag + pack('>L', len(val))[1:] + val
 
-    @property
-    def id3v2_items(self):
+    def get_id3v2_items(self, keep_unknown=False):
         """Yields encoded ID3v2 tag/value pairs"""
         for tag in ID3V2TAGS:
             attr = ID3TAGS[tag]
@@ -1453,6 +1448,10 @@ class MP3(BaseDecoder):
                 yield tag, val
             except SafeErrors:
                 pass
+
+        if keep_unknown and self._unknown:
+            for tag, val in self._unknown:
+                yield tag, val
 
     #####################################################################
     ### various useful static methods specific to ID3 or MP3 decoding ###
@@ -1867,4 +1866,3 @@ DECODERS = FLAC, M4A, OGG, IFF, MP3
 
 SafeErrors = (IOError, OSError, EOFError, StructError,
               ValidationError, DecodeError, EncodeError)
-
