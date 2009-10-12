@@ -3,7 +3,14 @@
 """Setup script for taglib"""
 
 import sys
+
+if sys.hexversion < 0x02060000:
+    print >> sys.stderr, 'Sorry, Python 2.6 is required.'
+    sys.exit(1)
+
 from distutils.core import setup
+
+sys.dont_write_bytecode = True  # don't leave turds
 from taglib import __version__
 
 def main():

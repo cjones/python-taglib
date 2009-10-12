@@ -15,6 +15,7 @@ import time
 import sys
 import os
 
+sys.dont_write_bytecode = True  # DOWN WITH PYC
 from taglib import (tagopen, StringIO, DICT, IDICT, TYPES,
                     LIST, IMAGE, InvalidMedia, __version__)
 
