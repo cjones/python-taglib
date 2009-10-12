@@ -90,7 +90,7 @@ except ImportError:
 
 __version__ = '1.1'
 __author__ = 'Chris Jones <cjones@gruntle.org>'
-__all__ = ['tagopen']
+__all__ = ['tagopen', 'InvalidMedia', 'ValidationError']
 
 #################
 ### CONSTANTS ###
@@ -862,9 +862,12 @@ class BaseDecoder(Metadata):
             elif type == UINT32:
                 if val < 0 or val > 0xffffffff:
                     raise ValidationError('out of range of uint32')
+            elif type == LIST:
+                if not isinstance(val, list):
+                    raise ValidationError('must be a list')
             else:
                 raise NotImplementedError(type)
-            if not val and type not in (DICT, IDICT):
+            if not val and type not in (DICT, IDICT, LIST):
                 val = None
         return val
 
