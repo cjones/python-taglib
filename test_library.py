@@ -12,8 +12,7 @@ from taglib import (tagopen, StringIO, DICT, IDICT, TYPES,
                     IMAGE, InvalidMedia, __version__)
 
 # initialize root logger
-log.basicConfig(level=log.INFO, stream=sys.stderr, datefmt='%c',
-                format='[%(asctime)s] %(levelname)s: %(message)s')
+log.basicConfig(level=log.INFO, format='%(levelname)s> %(message)s')
 
 # some common extensions and their expected decoder type
 exts = {'.m4a': 'm4a',
@@ -197,6 +196,7 @@ def main(args=None):
         log.info('opened logfile: %s' % opts.logfile)
     library = args[0]
     files_tested = files_broken = error_count = 0
+    log.info('begin at %s' % time.ctime())
     try:
         with Meter('TestLibrary', find(library)) as meter:
             for file in meter:
@@ -208,9 +208,9 @@ def main(args=None):
                     error_count += nerr
                     message = '%d error%s parsing %s' % (
                             nerr, 's' if nerr > 1 else '', file)
-                    meter.error(message)
+                    meter.warn(message)
                     for i, error in enumerate(errors):
-                        meter.info('error %d/%d: %s' % (i + 1, nerr, error))
+                        meter.error('error %d/%d: %s' % (i + 1, nerr, error))
     except KeyboardInterrupt:
         log.error('user cancelled test')
         return 2
