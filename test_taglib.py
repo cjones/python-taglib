@@ -143,10 +143,12 @@ class Meter(Timer):
             raise error, None, tb
 
 
-def find(dir):
+def find(dir, skip_svn=True):
     """Yields full path to files in a directory"""
     log.info('scanning %s' % dir)
     for basedir, subdirs, filenames in os.walk(dir):
+        if skip_svn and '.svn' in subdirs:
+            subdirs.remove('.svn')
         for filename in filenames:
             yield os.path.join(basedir, filename)
     log.info('finished scanning')
@@ -154,7 +156,8 @@ def find(dir):
 
 def test(file):
     """Test decode/save/decode of file and return errors if any"""
-    expected = exts.get(os.path.splitext(file)[1].lower())
+    ext = os.path.splitext(file)[1].lower()
+    expected = exts.get(ext)
     try:
         src = tagopen(file, readonly=False)
     except InvalidMedia:
@@ -162,9 +165,11 @@ def test(file):
     except Exception, error:
         return ['unexpected decode error: %s' % error]
     errors = []
-    if src.format != expected:
+    # actual mp3 files can be inside a RIFF container, so don't complain
+    if src.format != expected and not (ext == '.mp3' and src.format == 'iff'):
         errors.append('unexpected format.  %s != %s' % (expected, src.format))
-    if src.close:
+    # on the other hand, don't try to save unless it did find an mp3
+    if src.close or (src.format == 'iff' and not src.has_mp3data):
         return errors
     try:
         dst = src.save(StringIO())
