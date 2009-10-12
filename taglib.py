@@ -85,7 +85,7 @@ try:
 except ImportError:
     Image = None
 
-__version__ = '1.2'
+__version__ = '1.1'
 __author__ = 'Chris Jones <cjones@gruntle.org>'
 __all__ = ['tagopen']
 
