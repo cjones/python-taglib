@@ -1,6 +1,13 @@
 #!/usr/bin/env python
 
-"""Test taglib's ability to handle a library transparently"""
+"""Test taglib's encode/decode integrity.
+
+This tool will walk through all the files in a directory and attempt to
+decode them, verifying the format is appropriate for the extension.  If
+encoding is supported, it will encode the file, decode the saved
+version, and compare the metadata in each to verify they are identical.
+All errors are logged to the console and optionally to a logfile.
+"""
 
 from optparse import OptionParser
 import logging as log
