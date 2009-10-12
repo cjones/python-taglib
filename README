@@ -1,3 +1,9 @@
+Requirements:
+
+    Python-2.6
+    Python Imaging Library (PIL) if you want image support
+
+
 Installing:
 
     python setup.py build
@@ -6,22 +12,55 @@ Installing:
 
 Example usage:
 
-    import taglib
+    from taglib import tagopen, InvalidMedia, ValidationError
+
+    # open metadata read-only
     try:
-        tag = taglib.tagopen('somefile.mp3')
-    except taglib.InvalidMedia:
+        tag = tagopen('somefile.mp3')
+    except InvalidMedia:
         print 'no decoder found'
-    tag.genre = u'Alternative'
-    tag['year'] = 1974
-    tag.save('new.mp3')
-    tag.dump(stream=sys.stdout)  # shows formatted metadata
-    other = taglib.tagopen('hugs.m4a')
-    tag.update(other)
-    print tag
-    tag.image = 'someimage.jpg'  # can set a path, open file, or PIL instance
+
+    # if you plan on changing anything, only with readonly=False
+    # you can also pass already-open files to tagopen
+    with open('anotherfile.mp3', 'rb') as fp:
+        tag = tagopen(fp, readonly=False)
+        tag.genre = u'Alternative'
+        tag['year'] = 1974
+
+        # metadata is validated when set:
+        try:
+            tag['year'] = -4
+        except ValidationError, error:
+            print error
+            # ValidationError: year: out of range of uint16
+
+        tag.save('new.mp3')
+
+    # show formatted metadata
+    tag.dump(stream=sys.stdout)
+
+    # if there are unrecognized tags, they go in _unknown
+    print tag._unknown
+
+    # if you want to preserve unknown tags when you write:
+    tag.save('new.mp3', keep_unknown=True)
+
+    # you can copy metadata from one tag to another:
+    src = tagopen('old.m4a')
+    dst = tagopen('new.mp3')
+    dst.update(src)
+
+    # a tag's repr() shows the set metadata:
+    print repr(tag)
+
+    # for images, you can give it a path, open file, or PIL ImageFile:
+    tag.image = 'someimage.jpg'
+
+    # you can nuke metadata by clearing the dictionary:
     tag.clear()
     tag.save('no-metadata.mp3')
 
+    # tagdump script will dump a formatted metadata dispaly:
     $ tagdump /path/to/mp3s/
 
 
@@ -51,6 +90,9 @@ Notes:
       iTunes uses to store metadata.  These tags are:
 
       album, album artist, artist, bpm, comment, compilation, composer, disk, encoder, gapless, genre, grouping, image, lyrics, name, sort album, sort album artist, sort artist, sort composer, sort name, sort video show, track, video description, video episode, video episode id, video season, video show, volume, year,
+
+      ... anything else is stored in _unknown, provided you opened it with
+          readonly=False
 
 
 Contact:
