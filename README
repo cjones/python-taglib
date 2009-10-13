@@ -36,6 +36,11 @@ Example usage:
 
         tag.save('new.mp3')
 
+        # you can force the id3v2 version to use, otherwise it defaults to
+        # what it was originally.  if you set keep_unknown, however, and there
+        # are unknown tags, the versions need to match.
+        tag.save('new.mp3', version=4)
+
     # show formatted metadata
     tag.dump(stream=sys.stdout)
 
