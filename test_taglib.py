@@ -155,7 +155,7 @@ def find(dir, skip_svn=True):
     log.info('finished scanning')
 
 
-def test(file):
+def test(file, version=None):
     """Test decode/save/decode of file and return errors if any"""
     ext = os.path.splitext(file)[1].lower()
     expected = exts.get(ext)
@@ -172,8 +172,10 @@ def test(file):
     # on the other hand, don't try to save unless it did find an mp3
     if src.close or (src.format == 'iff' and not src.has_mp3data):
         return errors
+    if version is None:
+        version = src.version
     try:
-        dst = src.save(StringIO())
+        dst = src.save(StringIO(), version)
     except Exception, error:
         return errors + ['could not save: %s' % error]
     try:
@@ -195,9 +197,10 @@ def test(file):
 def main(args=None):
     optparse = OptionParser('%prog <dir>', version=__version__,
                             description=__doc__)
-    group = optparse.add_option_group('Log options')
-    group.add_option('-l', dest='logfile', metavar='<file>',
-                     help='log messages to <file>')
+    optparse.add_option('-l', dest='logfile', metavar='<file>',
+                        help='log messages to <file>')
+    optparse.add_option('-V', dest='version', metavar='<2|3|4>', type='int',
+                        help='force id3 version (default: same as source)')
     opts, args = optparse.parse_args(args)
     if len(args) != 1:
         optparse.print_help()
@@ -214,7 +217,7 @@ def main(args=None):
         with Meter('TestLibrary', find(library)) as meter:
             for file in meter:
                 files_tested += 1
-                errors = test(file)
+                errors = test(file, version=opts.version)
                 nerr = len(errors)
                 if nerr:
                     files_broken += 1

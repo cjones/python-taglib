@@ -102,6 +102,7 @@ BLOCKSIZE = 4096  # size of buffered I/O
 RVA2FACTOR = 33153.0 / 3135  # multiplier for volume adjustment
 GAPLESS = u'iTunPGAP'  # comment key for id3v2 comments
 ENCODING = sys.getfilesystemencoding()  # default output encoding
+ID3VERSION = 2  # default id3v2 version to encode in
 
 # flags to keep the code somewhat readable
 (ATOM_CONTAINER1, ATOM_CONTAINER2, ATOM_DATA, BOOL, DICT, GENRE,
@@ -1026,6 +1027,11 @@ class MP3(BaseDecoder):
     # one possible change here is to make it default to this behavior if
     # and only if it couldn't find the named one.
 
+    def __init__(self, *args, **kwargs):
+        self.version = None
+        self.has_mp3data = False
+        super(MP3, self).__init__(*args, **kwargs)
+
     def getdict(self, attr, key):
         """Get managed dict item"""
         dict = self[attr]
@@ -1171,7 +1177,6 @@ class MP3(BaseDecoder):
         except SafeErrors:
             pass
         mp3end = fp.tell()
-        self.version = None
         try:
             self.decode_id3v2(fp, offset)
         except SafeErrors:
@@ -1324,6 +1329,8 @@ class MP3(BaseDecoder):
             raise EncodeError('no mp3 data')
         if version is None:
             version = self.version
+        if version is None:
+            version = ID3VERSION
         if version not in ID3TAGS:
             raise EncodeError('unsupported id3 version')
         if self._unknown and keep_unknown and version != self.version:
@@ -1636,7 +1643,6 @@ class IFF(MP3):
 
     def decode(self, fp, offset=0):
         """Decodes metadata on open RIFF/AIFF file"""
-        self.has_mp3data = False
         try:
             self.decode_id3v1(fp)
         except SafeErrors:
