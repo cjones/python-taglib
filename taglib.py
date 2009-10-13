@@ -148,85 +148,84 @@ ATTRS = [key for key in TYPES.keys() if not key.startswith('_')]
 # attributes present in id3v1 tag
 ID3V1FIELDS = ['name', 'artist', 'album', 'year', 'comment', 'track', 'genre']
 
-# tags for id3v2.2 that we can encode
-ID3V2TAGS = ['TSC', 'TSA', 'TST', 'COM', 'TSP', 'RVA', 'TEN', 'PIC', 'TCP',
-             'TCO', 'TCM', 'TP2', 'TP1', 'TAL', 'TRK', 'TPA', 'TT3', 'TT2',
-             'TT1', 'ULT', 'TYE', 'TBP', 'TS2']
-
 # map of id3v2 tags to attributes. this is NOT comprehensive,
 # and some of these aren't even in the spec.  please see the rather
 # lengthy rant in the MP3 class for my take on ID3.
-ID3TAGS = {'APIC': '_image',
-           'COM': '_comment',
-           'COM ': '_comment',
-           'COMM': '_comment',
-           'PIC': '_image',
-           'PIC ': '_image',
-           'RVA': 'volume',
-           'RVA ': 'volume',
-           'RVA2': 'volume',
-           'RVAD': 'volume',
-           'TAL': 'album',
-           'TAL ': 'album',
-           'TALB': 'album',
-           'TBP': 'bpm',
-           'TBP ': 'bpm',
-           'TBPM': 'bpm',
-           'TCM': 'composer',
-           'TCM ': 'composer',
-           'TCMP': 'compilation',
-           'TCO': 'genre',
-           'TCO ': 'genre',
-           'TCOM': 'composer',
-           'TCON': 'genre',
-           'TCP': 'compilation',
-           'TCP ': 'compilation',
-           'TDRC': 'year',
-           'TEN': 'encoder',
-           'TEN ': 'encoder',
-           'TENC': 'encoder',
-           'TIT1': 'grouping',
-           'TIT2': 'name',
-           'TIT3': 'video_description',
-           'TP1': 'artist',
-           'TP1 ': 'artist',
-           'TP2': 'album_artist',
-           'TP2 ': 'album_artist',
-           'TPA': 'disk',
-           'TPA ': 'disk',
-           'TPE1': 'artist',
-           'TPE2': 'album_artist',
-           'TPOS': 'disk',
-           'TRCK': 'track',
-           'TRK': 'track',
-           'TRK ': 'track',
-           'TS2': 'sort_album_artist',
-           'TS2 ': 'sort_album_artist',
-           'TSA': 'sort_album',
-           'TSA ': 'sort_album',
-           'TSC': 'sort_composer',
-           'TSC ': 'sort_composer',
-           'TSO2': 'sort_album_artist',
-           'TSOA': 'sort_album',
-           'TSOC': 'sort_composer',
-           'TSOP': 'sort_artist',
-           'TSOT': 'sort_name',
-           'TSP': 'sort_artist',
-           'TSP ': 'sort_artist',
-           'TST': 'sort_name',
-           'TST ': 'sort_name',
-           'TT1': 'grouping',
-           'TT1 ': 'grouping',
-           'TT2': 'name',
-           'TT2 ': 'name',
-           'TT3': 'video_description',
-           'TT3 ': 'video_description',
-           'TYE': 'year',
-           'TYE ': 'year',
-           'TYER': 'year',
-           'ULT': '_lyrics',
-           'ULT ': '_lyrics',
-           'USLT': '_lyrics'}
+ID3TAGS = {2: (3, 3, 0, False,
+               {'COM': '_comment',
+                'PIC': '_image',
+                'RVA': 'volume',
+                'TAL': 'album',
+                'TBP': 'bpm',
+                'TCM': 'composer',
+                'TCO': 'genre',
+                'TCP': 'compilation',
+                'TEN': 'encoder',
+                'TP1': 'artist',
+                'TP2': 'album_artist',
+                'TPA': 'disk',
+                'TRK': 'track',
+                'TS2': 'sort_album_artist',
+                'TSA': 'sort_album',
+                'TSC': 'sort_composer',
+                'TSP': 'sort_artist',
+                'TST': 'sort_name',
+                'TT1': 'grouping',
+                'TT2': 'name',
+                'TT3': 'video_description',
+                'TYE': 'year',
+                'ULT': '_lyrics'}),
+           3: (4, 4, 2, False,
+               {'APIC': '_image',
+                'COMM': '_comment',
+                'RVAD': 'volume',
+                'TALB': 'album',
+                'TBPM': 'bpm',
+                'TCMP': 'compilation',
+                'TCOM': 'composer',
+                'TCON': 'genre',
+                'TENC': 'encoder',
+                'TIT1': 'grouping',
+                'TIT2': 'name',
+                'TIT3': 'video_description',
+                'TPE1': 'artist',
+                'TPE2': 'album_artist',
+                'TPOS': 'disk',
+                'TRCK': 'track',
+                'TSO2': 'sort_album_artist',
+                'TSOA': 'sort_album',
+                'TSOC': 'sort_composer',
+                'TSOP': 'sort_artist',
+                'TSOT': 'sort_name',
+                'TYER': 'year',
+                'USLT': '_lyrics'}),
+           4: (4, 4, 2, True,
+               {'APIC': '_image',
+                'COMM': '_comment',
+                'RVA2': 'volume',
+                'TALB': 'album',
+                'TBPM': 'bpm',
+                'TCMP': 'compilation',
+                'TCOM': 'composer',
+                'TCON': 'genre',
+                'TDRC': 'year',
+                'TENC': 'encoder',
+                'TIT1': 'grouping',
+                'TIT2': 'name',
+                'TIT3': 'video_description',
+                'TPE1': 'artist',
+                'TPE2': 'album_artist',
+                'TPOS': 'disk',
+                'TRCK': 'track',
+                'TSO2': 'sort_album_artist',
+                'TSOA': 'sort_album',
+                'TSOC': 'sort_composer',
+                'TSOP': 'sort_artist',
+                'TSOT': 'sort_name',
+                'USLT': '_lyrics'})}
+
+# fields supported by id3v2
+ID3V2FIELDS = ID3TAGS[2][4].values()
 
 # bitrate matrix for mp3 header
 BITRATES = [
@@ -993,7 +992,6 @@ class MP3(BaseDecoder):
     format = 'mp3'
     close = False
     genre_re = re.compile(r'^\((\d+)\)$')
-    ptype_re = re.compile(r'[\x00-\x14]')
     tag_re = re.compile(r'^[0-9A-Z ]{3,4}$')
 
     ######################################
@@ -1173,6 +1171,7 @@ class MP3(BaseDecoder):
         except SafeErrors:
             pass
         mp3end = fp.tell()
+        self.version = None
         try:
             self.decode_id3v2(fp, offset)
         except SafeErrors:
@@ -1223,14 +1222,10 @@ class MP3(BaseDecoder):
             head, version, revision, flags, size = unpack('3s3B4s', read(10))
             if head != 'ID3':
                 raise DecodeError('no id3v2 tag')
-            if version == 2:
-                taglen, sizelen, flagslen, syncsafe = 3, 3, 0, False
-            elif version == 3:
-                taglen, sizelen, flagslen, syncsafe = 4, 4, 2, False
-            elif version == 4:
-                taglen, sizelen, flagslen, syncsafe = 4, 4, 2, True
-            else:
+            if version not in ID3TAGS:
                 raise DecodeError('unknown version: %d' % version)
+            self.version = version
+            taglen, sizelen, flagslen, syncsafe, ids = ID3TAGS[version]
 
             # XXX getting all pissy about these two fields is probably
             # not worth it.  In theory, revision SHOULD be 0 (because
@@ -1259,7 +1254,7 @@ class MP3(BaseDecoder):
                 val = read(size)
                 if not val:
                     raise DecodeError('empty value')
-                attr = ID3TAGS.get(tag)
+                attr = ids.get(tag)
                 if not attr:
                     self.__dict__.setdefault('_unknown', []).append((tag, val))
                     raise DecodeError('unknown tag')
@@ -1285,10 +1280,10 @@ class MP3(BaseDecoder):
                         pass
                 elif type == IDICT:
                     ebyte, val = val[0], val[1:]
-                    if len(self.ptype_re.split(val, 1)[0]) == 3:
-                        val = val[3:]
-                    else:
+                    if tag == 'APIC':
                         val = self.split(val, offset=1)[1]
+                    else:
+                        val = val[3:]
                     ptype, val = ord(val[0]), val[1:]
                     key, val = self.split(val, ENCODINGS[ebyte][1], offset=1)
                     key = (self.validate(self.getstr(ebyte + key), TEXT),)
@@ -1297,7 +1292,10 @@ class MP3(BaseDecoder):
                     # limited implementation of volume adjustment tag.
                     # see the rant at the top of this class for an
                     # explanation why I didn't fully implement it.
-                    if tag == 'RVA':
+                    if tag == 'RVA2':
+                        val = self.split(val, offset=1)[1][1:3]
+                        val = int(unpack('>h', val)[0] * RVA2FACTOR)
+                    else:
                         pos, bits = ord(val[0]) & 1, ord(val[1])
                         i, r = divmod(bits, 8)
                         if r:
@@ -1305,9 +1303,6 @@ class MP3(BaseDecoder):
                         val = self.getint(val[2:2 + i])
                         if not pos:
                             val *= -1
-                    else:
-                        val = self.split(val, offset=1)[1][1:3]
-                        val = int(unpack('>h', val)[0] * RVA2FACTOR)
                 if not val:
                     raise DecodeError('empty value')
                 if key:
@@ -1323,20 +1318,26 @@ class MP3(BaseDecoder):
     ### encoding-related functions ###
     ##################################
 
-    def save(self, file, keep_unknown=False):
+    def save(self, file, version=None, keep_unknown=False):
         """Save mp3 with updated metadata to file"""
         if not self.has_mp3data:
             raise EncodeError('no mp3 data')
+        if version is None:
+            version = self.version
+        if version not in ID3TAGS:
+            raise EncodeError('unsupported id3 version')
+        if self._unknown and keep_unknown and version != self.version:
+            raise EncodeError('version must be %d to keep unknown' %
+                              self.version)
         with FlexOpen(file, 'wb') as fp:
-            self.encode(fp, keep_unknown)
+            self.encode(fp, version, keep_unknown)
         # return fp so we can do tagopen(obj.save(StringIO()))  :P
         return fp
 
-    def encode(self, fp, keep_unknown=False):
+    def encode(self, fp, version=2, keep_unknown=False):
         """Encode mp3/metadata to open file"""
         id3v1 = id3v2 = False
-        for tag in ID3V2TAGS:
-            attr = ID3TAGS[tag]
+        for attr in ID3V2FIELDS:
             if self[attr]:
                 id3v2 = True
                 if attr in ID3V1FIELDS:
@@ -1345,7 +1346,7 @@ class MP3(BaseDecoder):
         if not id3v2 and keep_unknown and self._unknown:
             id3v2 = True
         if id3v2:
-            self.encode_id3v2(fp, keep_unknown)
+            self.encode_id3v2(fp, version, keep_unknown)
         for val in self.mp3data:
             fp.write(val)
         if id3v1:
@@ -1365,40 +1366,34 @@ class MP3(BaseDecoder):
             val.append('\xff')
         fp.write(''.join(val))
 
-    def encode_id3v2(self, fp, keep_unknown=False):
+    def encode_id3v2(self, fp, version=2, keep_unknown=False):
         """Encode ID3v2 tag to open file"""
         head = fp.tell()
-        fp.write(pack('>3s3BL', 'ID3', 2, 0, 0, 0))
+        fp.write(pack('>3s3BL', 'ID3', version, 0, 0, 0))
         size = 0
-        for val in self.get_id3v2_tags(keep_unknown):
+        for val in self.get_id3v2_tags(version, keep_unknown):
             fp.write(val)
             size += len(val)
         pos = fp.tell()
         try:
-            # go back and rewrite the size header now that we know what
-            # it is.  The piece of bitwise nastiness below is an
-            # implementation of the "syncsafe" format.  This was the
-            # least computationally expensive way I could find to
-            # convert an integer to syncsafe bits
             fp.seek(head + 6)
-            size = unpack('4B', pack('>L', size))
-            fp.write(pack('4B',
-                          ((size[1] >> 5) & 0x07) | (size[0] << 3) & 0x7f,
-                          ((size[2] >> 6) & 0x03) | (size[1] << 2) & 0x7f,
-                          ((size[3] >> 7) & 0x01) | (size[2] << 1) & 0x7f,
-                          ((size[3] >> 0) & 0x7f)))
+            fp.write(self.getbytes(size, syncsafe=True))
         finally:
             fp.seek(pos, os.SEEK_SET)
 
-    def get_id3v2_tags(self, keep_unknown=False):
+    def get_id3v2_tags(self, version=2, keep_unknown=False):
         """Yields encoded ID3v2 tags"""
-        for tag, val in self.get_id3v2_items(keep_unknown):
-            yield tag + pack('>L', len(val))[1:] + val
+        taglen, sizelen, flagslen, syncsafe, ids = ID3TAGS[version]
+        for tag, val in self.get_id3v2_items(ids, keep_unknown):
+            if len(tag) != taglen:
+                raise EncodeError('invalid tagsize: %d' % len(tag))
+            size = self.getbytes(len(val), syncsafe)[sizelen * -1:]
+            flags = '\x00' * flagslen
+            yield tag + size + flags + val
 
-    def get_id3v2_items(self, keep_unknown=False):
+    def get_id3v2_items(self, ids, keep_unknown=False):
         """Yields encoded ID3v2 tag/value pairs"""
-        for tag in ID3V2TAGS:
-            attr = ID3TAGS[tag]
+        for tag, attr in ids.iteritems():
             try:
                 val = self[attr]
                 if not val:
@@ -1430,24 +1425,33 @@ class MP3(BaseDecoder):
                     for key, val in val.iteritems():
                         key = self.mkstr(key[0])
                         val, ptype = val
-                        fmt = 'JPG' if val.format == 'JPEG' else val.format[:3]
+                        if tag == 'APIC':
+                            fmt = 'image/%s\x00' % val.format.lower()
+                        elif val.format == 'JPEG':
+                            fmt = 'JPG'
+                        else:
+                            fmt = val.format[:3]
                         data = StringIO()
                         val.save(data, val.format)
                         yield tag, (key[0] + fmt + chr(ptype) +
                                     key[1:] + data.getvalue())
                     continue
                 elif type == INT32:
-                    if val < 0:
-                        dir = '\x00'
-                        val *= -1
+                    if tag == 'RVA2':
+                        val = pack('>h', int(val / RVA2FACTOR))
+                        val = '\x00\x01%s\x00' % val
                     else:
-                        dir = '\x03'
-                    val = list(pack('>L', val))
-                    while val and val[0] == '\x00':
-                        val.pop(0)
-                    val = ''.join(val)
-                    i = len(val)
-                    val = dir + chr(i * 8) + val * 2 + '\x00' * i * 2
+                        if val < 0:
+                            dir = '\x00'
+                            val *= -1
+                        else:
+                            dir = '\x03'
+                        val = list(pack('>L', val))
+                        while val and val[0] == '\x00':
+                            val.pop(0)
+                        val = ''.join(val)
+                        i = len(val)
+                        val = dir + chr(i * 8) + val * 2 + '\x00' * i * 2
                 elif type == UINT16:
                     val = unicode(val)
                 elif type == UINT16X2:
@@ -1471,9 +1475,21 @@ class MP3(BaseDecoder):
         """Unpack bytes to integer, honoring the awful "syncsafe" algorithm"""
         val = unpack('>L', '\x00' * (4 - len(val)) + val)[0]
         if syncsafe:
-            # see the encode_id3v2() function for how to do this in reverse
             val = (((val & 0x0000007f) >> 0) | ((val & 0x00007f00) >> 1) |
                    ((val & 0x007f0000) >> 2) | ((val & 0x7f000000) >> 3))
+        return val
+
+    @staticmethod
+    def getbytes(val, syncsafe=False):
+        """Pack integer"""
+        val = pack('>L', val)
+        if syncsafe:
+            val = unpack('4B', val)
+            val = pack('4B',
+                       ((val[1] >> 5) & 0x07) | (val[0] << 3) & 0x7f,
+                       ((val[2] >> 6) & 0x03) | (val[1] << 2) & 0x7f,
+                       ((val[3] >> 7) & 0x01) | (val[2] << 1) & 0x7f,
+                       ((val[3] >> 0) & 0x7f))
         return val
 
     @classmethod
