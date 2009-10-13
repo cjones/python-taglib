@@ -195,7 +195,8 @@ def test(file, version=None):
 
 
 def main(args=None):
-    optparse = OptionParser('%prog <dir>', version=__version__,
+    """Command-line interface"""
+    optparse = OptionParser('%prog [opts] <dir>', version=__version__,
                             description=__doc__)
     optparse.add_option('-l', dest='logfile', metavar='<file>',
                         help='log messages to <file>')
