@@ -557,7 +557,7 @@ class Metadata(Container):
             print >> stream, 'No metadata to display'
 
     def __eq__(self, other):
-        if not isinstance(other, Decoder):
+        if not isinstance(other, Metadata):
             return NotImplemented
         try:
             self.compare(self, other)
@@ -672,24 +672,13 @@ class Decoder(Metadata):
     @classmethod
     def validate(cls, val, type):
         if val is not None:
-            if type == 'BOOL':
-                if isinstance(val, basestring):
-                    if isinstance(val, unicode):
-                        val = val.encode('ascii', 'ignore').strip()
-                    val = val.lower().strip()
-                    for result, vals in BOOLS.iteritems():
-                        if val in vals:
-                            val = result
-                            break
-                    else:
-                        raise ValidationError('invalid boolean string')
-            elif type == 'GENRE':
+            if type == 'GENRE':
                 if isinstance(val, (int, long)):
                     if val < 0 or val > 0xff:
                         raise ValidationError('out of range')
                     val = GENRES[val]
                 type = 'TEXT'
-            elif type == 'UINT16':
+            elif type in ('UINT16', 'UINT32'):
                 if isinstance(val, basestring):
                     try:
                         val = int(val)
@@ -700,6 +689,21 @@ class Decoder(Metadata):
             if type in ('DICT', 'IDICT'):
                 if not isinstance(val, dict):
                     raise ValidationError('must be a dictionary')
+            elif type == 'BOOL':
+                if isinstance(val, basestring):
+                    if isinstance(val, unicode):
+                        val = val.encode('ascii', 'ignore').strip()
+                    val = val.lower().strip()
+                    for result, vals in BOOLS.iteritems():
+                        if val in vals:
+                            val = result
+                            break
+                    else:
+                        raise ValidationError('invalid boolean string')
+                elif isinstance(val, (int, long)):
+                    val = bool(val)
+                elif not isinstance(val, bool):
+                    raise ValidationError('invalid boolean')
             elif type == 'IMAGE':
                 if not PIL:
                     raise ValidationError('must install PIL for image support')
@@ -734,6 +738,9 @@ class Decoder(Metadata):
             elif type == 'UINT16':
                 if val < 0 or val > 0xffff:
                     raise ValidationError('out of range of uint16')
+            elif type == 'UINT32':
+                if val < 0 or val > 0xffffffff:
+                    raise ValidationError('out of range of uint32')
             elif type == 'UINT16X2':
                 if isinstance(val, basestring):
                     val = [int(i) if i.isdigit() else 0 for i in val.split('/')]
