@@ -16,24 +16,11 @@ import sys
 import os
 
 sys.dont_write_bytecode = True  # DOWN WITH PYC
-from taglib import (tagopen, StringIO, DICT, IDICT, TYPES,
-                    LIST, IMAGE, InvalidMedia, __version__)
+
+from taglib import tagopen, ValidationError, InvalidMedia, __version__, MP3
 
 # initialize root logger
 log.basicConfig(level=log.INFO, format='%(levelname)s> %(message)s')
-
-# some common extensions and their expected decoder type
-exts = {'.m4a': 'm4a',
-        '.m4r': 'm4a',
-        '.mp4': 'm4a',
-        '.mp3': 'mp3',
-        '.mp2': 'mp3',
-        '.flac': 'flac',
-        '.aif': 'iff',
-        '.aiff': 'iff',
-        '.wav': 'iff',
-        '.avi': 'iff',
-        '.ogg': 'ogg'}
 
 class Timer(object):
 
@@ -158,7 +145,6 @@ def find(dir, skip_svn=True):
 def test(file, version=None):
     """Test decode/save/decode of file and return errors if any"""
     ext = os.path.splitext(file)[1].lower()
-    expected = exts.get(ext)
     try:
         src = tagopen(file, readonly=False)
     except InvalidMedia:
@@ -167,30 +153,20 @@ def test(file, version=None):
         return ['unexpected decode error: %s' % error]
     errors = []
     # actual mp3 files can be inside a RIFF container, so don't complain
-    if src.format != expected and not (ext == '.mp3' and src.format == 'iff'):
-        errors.append('unexpected format.  %s != %s' % (expected, src.format))
-    # on the other hand, don't try to save unless it did find an mp3
-    if src.close or (src.format == 'iff' and not src.has_mp3data):
+    if not isinstance(src, MP3):
         return errors
-    if version is None:
-        version = src.version
     try:
-        dst = src.save(StringIO(), version)
+        dst = src.dump(version=version)
     except Exception, error:
         return errors + ['could not save: %s' % error]
     try:
         dst = tagopen(dst)
     except Exception, error:
         return errors + ['could not reopen: %s' % error]
-    for attr, type in TYPES.iteritems():
-        if type in (DICT, IDICT, LIST):
-            continue
-        if type == IMAGE:
-            val1, val2 = src.image_sample, dst.image_sample
-        else:
-            val1, val2 = src[attr], dst[attr]
-        if val1 != val2:
-            errors.append('%s: %r != %r' % (attr, val1, val2))
+    try:
+        MP3.compare(src, dst)
+    except ValidationError, error:
+        errors.append(error)
     return errors
 
 
