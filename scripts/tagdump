@@ -52,7 +52,7 @@ def main(args=None):
         for path in args:
             for file in find(path):
                 try:
-                    tagopen(file).dump(filename=os.path.basename(file))
+                    tagopen(file).display(filename=os.path.basename(file))
                     print
                 except InvalidMedia:
                     pass
