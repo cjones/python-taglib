@@ -20,39 +20,56 @@ Example usage:
     except InvalidMedia:
         print 'no decoder found'
 
-    # if you plan on changing anything, only with readonly=False
-    # you can also pass already-open files to tagopen
-    with open('anotherfile.mp3', 'rb') as fp:
+    # if you wish to rewrite the tags, open without readonly:
+    tag = tagopen('somefile.mp3', readonly=False)
+
+    # you can pass already-open files to tagopen.  if you open the file
+    # yourself and intend to write in-place, you must open it as 'r+'
+    with open('anotherfile.mp3', 'r+') as fp:
         tag = tagopen(fp, readonly=False)
-        tag.genre = u'Alternative'
-        tag['year'] = 1974
 
-        # metadata is validated when set:
-        try:
-            tag['year'] = -4
-        except ValidationError, error:
-            print error
-            # ValidationError: year: out of range of uint16
+    # if you know exactly what decoder you will need, it can be
+    # faster to use it directly.  these objects are never readonly.
+    tag = MP3('somefile.mp3')
 
-        tag.save('new.mp3')
+    # you can change metadata as a dict or attribute:
+    tag.genre = u'Alternative'
+    tag['year'] = 1974
 
-        # you can force the id3v2 version to use, otherwise it defaults to
-        # what it was originally.  if you set keep_unknown, however, and there
-        # are unknown tags, the versions need to match.
-        tag.save('new.mp3', version=4)
+    # metadata is validated when set:
+    try:
+        tag['year'] = -4
+    except ValidationError, error:
+        # ValidationError: year: out of range of uint16
+
+    # show formatted (default to STDOUT)
+    tag.display(stream=sys.stderr)
+
+    # write new mp3 with update metadata
+    tag.dump('new.mp3')
+
+    # write in-place.
+    tag.name = 'hi'
+    tag.save()
+
+    # get whole thing as a string
+    mp3 = tag.dumps()
+
+    # change the ID3 version
+    tag.save(version=4)
 
     # show formatted metadata
-    tag.dump(stream=sys.stdout)
+    tag.display(stream=sys.stdout)
 
     # if there are unrecognized tags, they go in _unknown
     print tag._unknown
 
     # if you want to preserve unknown tags when you write:
-    tag.save('new.mp3', keep_unknown=True)
+    tag.save('new.mp3', unknown=True)
 
     # you can copy metadata from one tag to another:
     src = tagopen('old.m4a')
-    dst = tagopen('new.mp3')
+    dst = tagopen('new.mp3', readonly=False)
     dst.update(src)
 
     # a tag's repr() shows the set metadata:
@@ -60,6 +77,8 @@ Example usage:
 
     # for images, you can give it a path, open file, or PIL ImageFile:
     tag.image = 'someimage.jpg'
+    tag.image = fp
+    tag.image = PIL.Image.open(fp)
 
     # you can nuke metadata by clearing the dictionary:
     tag.clear()
@@ -71,8 +90,7 @@ Example usage:
 
 Notes:
 
-    * Rewriting tags is only supported for MP3 (ID3) formats.  It saves
-      to a new file rather than trying to write in-place.
+    * Rewriting tags is only supported for MP3 (ID3) formats.
 
     * Supported formats are M4A (mpeg4), MP3 (id3), FLAC (vorbis),
       OGG (vorbis), and IFF (wav/aiff).
