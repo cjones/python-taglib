@@ -776,6 +776,7 @@ class MP3(Decoder):
     id3v2 = Struct('3s3B4s')
 
     tag_re = re.compile(r'^[A-Z0-9 ]{3,4}$')
+    track_re = re.compile(r'^(.+)\x00 ([^\x00])$')
 
     fakemp3 = '\xff\xf2\x14\x00' * 13
 
@@ -1068,7 +1069,12 @@ class MP3(Decoder):
             self.comment = tag[5][:28]
             self.track = ord(tag[5][29])
         else:
-            self.comment = tag[5]
+            try:
+                comment, track = self.track_re.search(tag[5]).groups()
+                self.comment = comment
+                self.track = ord(track)
+            except AttributeError:
+                self.comment = tag[5]
         self.genre = tag[6]
 
     def save(self, version=None, unknown=False):
