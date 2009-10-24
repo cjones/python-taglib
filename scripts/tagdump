@@ -35,6 +35,10 @@ from taglib import __version__, tagopen, InvalidMedia
 def find(path):
     if os.path.isdir(path):
         for basedir, subdirs, filenames in os.walk(path):
+            try:
+                subdirs.remove('.svn')
+            except ValueError:
+                pass
             for filename in filenames:
                 yield os.path.join(basedir, filename)
     elif os.path.isfile(path):
