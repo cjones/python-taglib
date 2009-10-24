@@ -1,4 +1,3 @@
-# Copyright (c) 2009, Chris Jones
 # All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
@@ -30,35 +29,13 @@
 # MP3:    http://www.mpgedit.org/mpgedit/mpeg_format/mpeghdr.htm
 # ID3v1:  http://en.wikipedia.org/wiki/Id3#Layout
 # ID3v2:  http://www.id3.org/Developer_Information
+# RVA:    http://git.savannah.gnu.org/cgit/gnupod.git/tree/src/ext/FileMagic.pm
 # IFF:    http://en.wikipedia.org/wiki/Interchange_File_Format
 # RIFF:   http://www.midi.org/about-midi/rp29spec(rmid).pdf
 # MP4:    http://atomicparsley.sourceforge.net/mpeg-4files.html
 # Vorbis: http://www.xiph.org/vorbis/doc/v-comment.html
 # FLAC:   http://flac.sourceforge.net/format.html#stream
 # OGG:    http://en.wikipedia.org/wiki/Ogg#File_format
-#
-# TODO:
-#       1. save() methods for other formats besides MP3/ID3.
-#       2. possibly find a way to rewrite ID3 tags in-place when there
-#          is sufficient padding to do so.
-#       3. not sure if the rva/rva2 decoder is implemented
-#          properly... needs more rigorous testing.  It seems like maybe
-#          iTunes uses these two tags completely differently and just
-#          multiplying the rva2 value by a static factor doesn't work
-#          consistently.  that said, if this is not done right
-#          currently, my feelings can be summed up thusly:
-#
-#          CARE-O-METER: |....o...................................|
-
-"""
-Library to read metadata on mp3/flac/mp4/wav/aif/ogg files.  Can write
-back updated metadata for mp3/id3.
-
-http://code.google.com/p/python-taglib/
-
-See comments in-file for detailed information on each decoder and a rant
-on the terribleness of ID3v2.
-"""
 
 from __future__ import with_statement
 import sys
@@ -67,9 +44,9 @@ if sys.hexversion < 0x02060200:
     print >> sys.stderr, 'Sorry, Python 2.6 is required'
     sys.exit(0)
 
+from struct import Struct, error as StructError
 from collections import MutableMapping
-from struct import error as StructError
-from struct import pack, unpack
+from math import log
 import os
 import re
 
@@ -78,157 +55,142 @@ try:
 except ImportError:
     from StringIO import StringIO
 
-# PIL support is required for image parsing.  I did this because I found
-# many image attachments (especially in ID3) to be hopelessly corrupt,
-# so this at least ensures you don't write back garbage, and keeps the
-# attributes from being full of large binary data in a string.
 try:
     from PIL import Image
     from PIL.ImageFile import ImageFile
+    PIL = True
 except ImportError:
-    Image = None
+    PIL = False
 
-__version__ = '1.1'
+__version__ = '2.0'
 __author__ = 'Chris Jones <cjones@gruntle.org>'
 __all__ = ['tagopen', 'InvalidMedia', 'ValidationError']
 
-#################
-### CONSTANTS ###
-#################
+SAMPLESIZE = 1024
+GAPLESS = u'iTunPGAP'
+ANYITEM = -1
+DEFAULT_ID3V2_VERSION = 2
+DEFAULT_ID3V2_PADDING = 0
+ENCODING = sys.getfilesystemencoding()
 
-ANYITEM = -1  # use as key for managed dict items when key is unknown
-MAXJUNK = 65536  # maximum junk tolerated when seeking an mp3 frame
-BLOCKSIZE = 4096  # size of buffered I/O
-RVA2FACTOR = 33153.0 / 3135  # multiplier for volume adjustment
-GAPLESS = u'iTunPGAP'  # comment key for id3v2 comments
-ENCODING = sys.getfilesystemencoding()  # default output encoding
-ID3VERSION = 2  # default id3v2 version to encode in
+TYPES = {'_comment': 'DICT',
+         '_image': 'IDICT',
+         '_lyrics': 'DICT',
+         '_unknown': 'DICT',
+         'album': 'TEXT',
+         'album_artist': 'TEXT',
+         'artist': 'TEXT',
+         'bpm': 'UINT16',
+         'comment': 'TEXT',
+         'compilation': 'BOOL',
+         'composer': 'TEXT',
+         'disk': 'UINT16X2',
+         'encoder': 'TEXT',
+         'gapless': 'BOOL',
+         'genre': 'GENRE',
+         'grouping': 'TEXT',
+         'image': 'IMAGE',
+         'lyrics': 'TEXT',
+         'name': 'TEXT',
+         'sort_album': 'TEXT',
+         'sort_album_artist': 'TEXT',
+         'sort_artist': 'TEXT',
+         'sort_composer': 'TEXT',
+         'sort_name': 'TEXT',
+         'sort_video_show': 'TEXT',
+         'track': 'UINT16X2',
+         'video_description': 'TEXT',
+         'video_episode': 'UINT32',
+         'video_episode_id': 'TEXT',
+         'video_season': 'UINT32',
+         'video_show': 'TEXT',
+         'volume': 'VOLUME',
+         'year': 'UINT16'}
 
-# flags to keep the code somewhat readable
-(ATOM_CONTAINER1, ATOM_CONTAINER2, ATOM_DATA, BOOL, DICT, GENRE,
- IDICT, IMAGE, INT32, TEXT, UINT16, UINT16X2, UINT32, LIST) = xrange(14)
+BOOLS = {False: ['no', 'off', '0', 'false', 'n', 'f', '\x00'],
+         True: ['yes', 'on', '1', 'true', 'y', 't', '\x01']}
 
-# map of attributes to data types
-TYPES = {'_comment': DICT,
-         '_image': IDICT,
-         '_lyrics': DICT,
-         '_unknown': LIST,
-         'album': TEXT,
-         'album_artist': TEXT,
-         'artist': TEXT,
-         'bpm': UINT16,
-         'comment': TEXT,
-         'compilation': BOOL,
-         'composer': TEXT,
-         'disk': UINT16X2,
-         'encoder': TEXT,
-         'gapless': BOOL,
-         'genre': GENRE,
-         'grouping': TEXT,
-         'image': IMAGE,
-         'lyrics': TEXT,
-         'name': TEXT,
-         'sort_album': TEXT,
-         'sort_album_artist': TEXT,
-         'sort_artist': TEXT,
-         'sort_composer': TEXT,
-         'sort_name': TEXT,
-         'sort_video_show': TEXT,
-         'track': UINT16X2,
-         'video_description': TEXT,
-         'video_episode': UINT32,
-         'video_episode_id': TEXT,
-         'video_season': UINT32,
-         'video_show': TEXT,
-         'volume': INT32,
-         'year': UINT16}
+ID3V2OPTS = {2: {'frame': Struct('3s3s0s'),
+                 'syncsafe': False,
+                 'tags': {'COM': '_comment',
+                          'PIC': '_image',
+                          'RVA': 'volume',
+                          'TAL': 'album',
+                          'TBP': 'bpm',
+                          'TCM': 'composer',
+                          'TCO': 'genre',
+                          'TCP': 'compilation',
+                          'TEN': 'encoder',
+                          'TP1': 'artist',
+                          'TP2': 'album_artist',
+                          'TPA': 'disk',
+                          'TRK': 'track',
+                          'TS2': 'sort_album_artist',
+                          'TSA': 'sort_album',
+                          'TSC': 'sort_composer',
+                          'TSP': 'sort_artist',
+                          'TST': 'sort_name',
+                          'TT1': 'grouping',
+                          'TT2': 'name',
+                          'TT3': 'video_description',
+                          'TYE': 'year',
+                          'ULT': '_lyrics'}},
+             3: {'frame': Struct('4s4s2s'),
+                 'syncsafe': False,
+                 'tags': {'APIC': '_image',
+                          'COMM': '_comment',
+                          'RVAD': 'volume',
+                          'TALB': 'album',
+                          'TBPM': 'bpm',
+                          'TCMP': 'compilation',
+                          'TCOM': 'composer',
+                          'TCON': 'genre',
+                          'TENC': 'encoder',
+                          'TIT1': 'grouping',
+                          'TIT2': 'name',
+                          'TIT3': 'video_description',
+                          'TPE1': 'artist',
+                          'TPE2': 'album_artist',
+                          'TPOS': 'disk',
+                          'TRCK': 'track',
+                          'TSO2': 'sort_album_artist',
+                          'TSOC': 'sort_composer',
+                          'TYER': 'year',
+                          'USLT': '_lyrics'}},
+             4: {'frame': Struct('4s4s2s'),
+                 'syncsafe': True,
+                 'tags': {'APIC': '_image',
+                          'COMM': '_comment',
+                          'RVA2': 'volume',
+                          'TALB': 'album',
+                          'TBPM': 'bpm',
+                          'TCMP': 'compilation',
+                          'TCOM': 'composer',
+                          'TCON': 'genre',
+                          'TDRC': 'year',
+                          'TENC': 'encoder',
+                          'TIT1': 'grouping',
+                          'TIT2': 'name',
+                          'TIT3': 'video_description',
+                          'TPE1': 'artist',
+                          'TPE2': 'album_artist',
+                          'TPOS': 'disk',
+                          'TRCK': 'track',
+                          'TSO2': 'sort_album_artist',
+                          'TSOA': 'sort_album',
+                          'TSOC': 'sort_composer',
+                          'TSOP': 'sort_artist',
+                          'TSOT': 'sort_name',
+                          'USLT': '_lyrics'}}}
 
-# handy list of public metadata attributes
-ATTRS = [key for key in TYPES.keys() if not key.startswith('_')]
+ID3V2TAGS = dict((tag, attr) for opts in ID3V2OPTS.itervalues()
+                 for tag, attr in opts['tags'].iteritems())
 
-# attributes present in id3v1 tag
-ID3V1FIELDS = ['name', 'artist', 'album', 'year', 'comment', 'track', 'genre']
+ENCODINGS = {'\x00': ('latin-1', '\x00'),
+             '\x01': ('utf-16', '\x00\x00'),
+             '\x02': ('utf-16-be', '\x00\x00'),
+             '\x03': ('utf-8', '\x00')}
 
-# map of id3v2 tags to attributes. this is NOT comprehensive,
-# and some of these aren't even in the spec.  please see the rather
-# lengthy rant in the MP3 class for my take on ID3.
-ID3TAGS = {2: (3, 3, 0, False,
-               {'COM': '_comment',
-                'PIC': '_image',
-                'RVA': 'volume',
-                'TAL': 'album',
-                'TBP': 'bpm',
-                'TCM': 'composer',
-                'TCO': 'genre',
-                'TCP': 'compilation',
-                'TEN': 'encoder',
-                'TP1': 'artist',
-                'TP2': 'album_artist',
-                'TPA': 'disk',
-                'TRK': 'track',
-                'TS2': 'sort_album_artist',
-                'TSA': 'sort_album',
-                'TSC': 'sort_composer',
-                'TSP': 'sort_artist',
-                'TST': 'sort_name',
-                'TT1': 'grouping',
-                'TT2': 'name',
-                'TT3': 'video_description',
-                'TYE': 'year',
-                'ULT': '_lyrics'}),
-           3: (4, 4, 2, False,
-               {'APIC': '_image',
-                'COMM': '_comment',
-                'RVAD': 'volume',
-                'TALB': 'album',
-                'TBPM': 'bpm',
-                'TCMP': 'compilation',
-                'TCOM': 'composer',
-                'TCON': 'genre',
-                'TENC': 'encoder',
-                'TIT1': 'grouping',
-                'TIT2': 'name',
-                'TIT3': 'video_description',
-                'TPE1': 'artist',
-                'TPE2': 'album_artist',
-                'TPOS': 'disk',
-                'TRCK': 'track',
-                'TSO2': 'sort_album_artist',
-                'TSOA': 'sort_album',
-                'TSOC': 'sort_composer',
-                'TSOP': 'sort_artist',
-                'TSOT': 'sort_name',
-                'TYER': 'year',
-                'USLT': '_lyrics'}),
-           4: (4, 4, 2, True,
-               {'APIC': '_image',
-                'COMM': '_comment',
-                'RVA2': 'volume',
-                'TALB': 'album',
-                'TBPM': 'bpm',
-                'TCMP': 'compilation',
-                'TCOM': 'composer',
-                'TCON': 'genre',
-                'TDRC': 'year',
-                'TENC': 'encoder',
-                'TIT1': 'grouping',
-                'TIT2': 'name',
-                'TIT3': 'video_description',
-                'TPE1': 'artist',
-                'TPE2': 'album_artist',
-                'TPOS': 'disk',
-                'TRCK': 'track',
-                'TSO2': 'sort_album_artist',
-                'TSOA': 'sort_album',
-                'TSOC': 'sort_composer',
-                'TSOP': 'sort_artist',
-                'TSOT': 'sort_name',
-                'USLT': '_lyrics'})}
-
-# fields supported by id3v2
-ID3V2FIELDS = ID3TAGS[2][4].values()
-
-# bitrate matrix for mp3 header
 BITRATES = [
     [0, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448, 0],
     [0, 32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 0],
@@ -236,113 +198,45 @@ BITRATES = [
     [0, 32, 48, 56, 64, 80, 96, 112, 128, 144, 160, 176, 192, 224, 256, 0],
     [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0]]
 
-# sample rate matrix for mp3 header
-SRATES = [[11025, 12000, 8000, 0], 0,
-          [22050, 24000, 16000, 0],
-          [44100, 48000, 32000, 0]]
+SRATES = [[11025, 12000, 8000, 0], [0, 0, 0, 0],
+          [22050, 24000, 16000, 0], [44100, 48000, 32000, 0]]
 
-# encoding and terminator for id3v2 text strings
-ENCODINGS = {'\x00': ('latin-1', '\x00'),
-             '\x01': ('utf-16', '\x00\x00'),
-             '\x02': ('utf-16-be', '\x00\x00'),
-             '\x03': ('utf-8', '\x00')}
+ID3V1FIELDS = ['name', 'artist', 'album', 'year', 'comment', 'track', 'genre']
 
-# map of type id's to attributes for IFF formats. not comprehensive.
-IFFIDS = {'ANNO': 'comment',
-          'AUTH': 'artist',
-          'IART': 'artist',
-          'ICMT': 'comment',
-          'ICRD': 'year',
-          'IGNR': 'genre',
-          'INAM': 'name',
-          'ISFT': 'encoder',
-          'NAME': 'name'}
+ATOMS = {'moov': ('CONTAINER1', None),
+         'moov.udta': ('CONTAINER1', None),
+         'moov.udta.meta': ('CONTAINER2', None),
+         'moov.udta.meta.ilst': ('CONTAINER1', None),
+         'moov.udta.meta.ilst.aART': ('DATA', 'album_artist'),
+         'moov.udta.meta.ilst.covr': ('DATA', 'image'),
+         'moov.udta.meta.ilst.cpil': ('DATA', 'compilation'),
+         'moov.udta.meta.ilst.desc': ('DATA', 'video_description'),
+         'moov.udta.meta.ilst.disk': ('DATA', 'disk'),
+         'moov.udta.meta.ilst.gnre': ('DATA', 'genre'),
+         'moov.udta.meta.ilst.pgap': ('DATA', 'gapless'),
+         'moov.udta.meta.ilst.soaa': ('DATA', 'sort_album_artist'),
+         'moov.udta.meta.ilst.soal': ('DATA', 'sort_album'),
+         'moov.udta.meta.ilst.soar': ('DATA', 'sort_artist'),
+         'moov.udta.meta.ilst.soco': ('DATA', 'sort_composer'),
+         'moov.udta.meta.ilst.sonm': ('DATA', 'sort_name'),
+         'moov.udta.meta.ilst.sosn': ('DATA', 'sort_video_show'),
+         'moov.udta.meta.ilst.tmpo': ('DATA', 'bpm'),
+         'moov.udta.meta.ilst.trkn': ('DATA', 'track'),
+         'moov.udta.meta.ilst.tven': ('DATA', 'video_episode_id'),
+         'moov.udta.meta.ilst.tves': ('DATA', 'video_episode'),
+         'moov.udta.meta.ilst.tvsh': ('DATA', 'video_show'),
+         'moov.udta.meta.ilst.tvsn': ('DATA', 'video_season'),
+         'moov.udta.meta.ilst.\xa9ART': ('DATA', 'artist'),
+         'moov.udta.meta.ilst.\xa9alb': ('DATA', 'album'),
+         'moov.udta.meta.ilst.\xa9cmt': ('DATA', 'comment'),
+         'moov.udta.meta.ilst.\xa9day': ('DATA', 'year'),
+         'moov.udta.meta.ilst.\xa9gen': ('DATA', 'genre'),
+         'moov.udta.meta.ilst.\xa9grp': ('DATA', 'grouping'),
+         'moov.udta.meta.ilst.\xa9lyr': ('DATA', 'lyrics'),
+         'moov.udta.meta.ilst.\xa9nam': ('DATA', 'name'),
+         'moov.udta.meta.ilst.\xa9too': ('DATA', 'encoder'),
+         'moov.udta.meta.ilst.\xa9wrt': ('DATA', 'composer')}
 
-# map of mpeg4 atoms to atom type/attribute. not comprehensive list of
-# possible atoms, just the ones iTunes used when I made a point of
-# filling out every single metadata field.
-ATOMS = {'moov': (ATOM_CONTAINER1, None),
-         'moov.udta': (ATOM_CONTAINER1, None),
-         'moov.udta.meta': (ATOM_CONTAINER2, None),
-         'moov.udta.meta.ilst': (ATOM_CONTAINER1, None),
-         'moov.udta.meta.ilst.aART': (ATOM_DATA, 'album_artist'),
-         'moov.udta.meta.ilst.covr': (ATOM_DATA, 'image'),
-         'moov.udta.meta.ilst.cpil': (ATOM_DATA, 'compilation'),
-         'moov.udta.meta.ilst.desc': (ATOM_DATA, 'video_description'),
-         'moov.udta.meta.ilst.disk': (ATOM_DATA, 'disk'),
-         'moov.udta.meta.ilst.gnre': (ATOM_DATA, 'genre'),
-         'moov.udta.meta.ilst.pgap': (ATOM_DATA, 'gapless'),
-         'moov.udta.meta.ilst.soaa': (ATOM_DATA, 'sort_album_artist'),
-         'moov.udta.meta.ilst.soal': (ATOM_DATA, 'sort_album'),
-         'moov.udta.meta.ilst.soar': (ATOM_DATA, 'sort_artist'),
-         'moov.udta.meta.ilst.soco': (ATOM_DATA, 'sort_composer'),
-         'moov.udta.meta.ilst.sonm': (ATOM_DATA, 'sort_name'),
-         'moov.udta.meta.ilst.sosn': (ATOM_DATA, 'sort_video_show'),
-         'moov.udta.meta.ilst.tmpo': (ATOM_DATA, 'bpm'),
-         'moov.udta.meta.ilst.trkn': (ATOM_DATA, 'track'),
-         'moov.udta.meta.ilst.tven': (ATOM_DATA, 'video_episode_id'),
-         'moov.udta.meta.ilst.tves': (ATOM_DATA, 'video_episode'),
-         'moov.udta.meta.ilst.tvsh': (ATOM_DATA, 'video_show'),
-         'moov.udta.meta.ilst.tvsn': (ATOM_DATA, 'video_season'),
-         'moov.udta.meta.ilst.\xa9ART': (ATOM_DATA, 'artist'),
-         'moov.udta.meta.ilst.\xa9alb': (ATOM_DATA, 'album'),
-         'moov.udta.meta.ilst.\xa9cmt': (ATOM_DATA, 'comment'),
-         'moov.udta.meta.ilst.\xa9day': (ATOM_DATA, 'year'),
-         'moov.udta.meta.ilst.\xa9gen': (ATOM_DATA, 'genre'),
-         'moov.udta.meta.ilst.\xa9grp': (ATOM_DATA, 'grouping'),
-         'moov.udta.meta.ilst.\xa9lyr': (ATOM_DATA, 'lyrics'),
-         'moov.udta.meta.ilst.\xa9nam': (ATOM_DATA, 'name'),
-         'moov.udta.meta.ilst.\xa9too': (ATOM_DATA, 'encoder'),
-         'moov.udta.meta.ilst.\xa9wrt': (ATOM_DATA, 'composer')}
-
-# pre-defined genres according to winamp/mediasoft.  This is a bit
-# of retardation that started out with ID3v1 tags and has been
-# propagated in the ID3v2 spec as well as iTunes MP4.  All formats
-# support free-form genres if it doesn't match up with this list except
-# for id3v1.
-GENRES = ['Blues', 'Classic Rock', 'Country', 'Dance', 'Disco', 'Funk',
-          'Grunge', 'Hip-Hop', 'Jazz', 'Metal', 'New Age', 'Oldies', 'Other',
-          'Pop', 'R&B', 'Rap', 'Reggae', 'Rock', 'Techno', 'Industrial',
-          'Alternative', 'Ska', 'Death Metal', 'Pranks', 'Soundtrack',
-          'Euro-Techno', 'Ambient', 'Trip-Hop', 'Vocal', 'Jazz+Funk', 'Fusion',
-          'Trance', 'Classical', 'Instrumental', 'Acid', 'House', 'Game',
-          'Sound Clip', 'Gospel', 'Noise', 'Alternative Rock', 'Bass', 'Soul',
-          'Punk', 'Space', 'Meditative', 'Instrumental Pop',
-          'Instrumental Rock', 'Ethnic', 'Gothic', 'Darkwave',
-          'Techno-Industrial', 'Electronic', 'Pop-Folk', 'Eurodance', 'Dream',
-          'Southern Rock', 'Comedy', 'Cult', 'Gangsta', 'Top 40',
-          'Christian Rap', 'Pop/Funk', 'Jungle', 'Native US', 'Cabaret',
-          'New Wave', 'Psychadelic', 'Rave', 'Showtunes', 'Trailer', 'Lo-Fi',
-          'Tribal', 'Acid Punk', 'Acid Jazz', 'Polka', 'Retro', 'Musical',
-          'Rock & Roll', 'Hard Rock', 'Folk', 'Folk-Rock', 'National Folk',
-          'Swing', 'Fast Fusion', 'Bebob', 'Latin', 'Revival', 'Celtic',
-          'Bluegrass', 'Avantgarde', 'Gothic Rock', 'Progressive Rock',
-          'Psychedelic Rock', 'Symphonic Rock', 'Slow Rock', 'Big Band',
-          'Chorus', 'Easy Listening', 'Acoustic', 'Humour', 'Speech',
-          'Chanson', 'Opera', 'Chamber Music', 'Sonata', 'Symphony',
-          'Booty Bass', 'Primus', 'Porn Groove', 'Satire', 'Slow Jam', 'Club',
-          'Tango', 'Samba', 'Folklore', 'Ballad', 'Power Ballad',
-          'Rhythmic Soul', 'Freestyle', 'Duet', 'Punk Rock', 'Drum Solo',
-          'Acapella', 'Euro-House', 'Dance Hall', 'Goa', 'Drum & Bass',
-          'Club - House', 'Hardcore', 'Terror', 'Indie', 'BritPop',
-          'Negerpunk', 'Polsk Punk', 'Beat', 'Christian Gangsta Rap',
-          'Heavy Metal', 'Black Metal', 'Crossover', 'Contemporary Christian',
-          'Christian Rock', 'Merengue', 'Salsa', 'Thrash Metal', 'Anime',
-          'JPop', 'Synthpop', None, None, None, None, None, None, None, None,
-          None, None, None, None, None, None, None, None, None, None, None,
-          None, None, None, None, None, None, None, None, None, None, None,
-          None, None, None, None, None, None, None, None, None, None, None,
-          None, None, None, None, None, None, None, None, None, None, None,
-          None, None, None, None, None, None, None, None, None, None, None,
-          None, None, None, None, None, None, None, None, None, None, None,
-          None, None, None, None, None, None, None, None, None, None, None,
-          None, None, None, None, None, None, None, None, None, None, None,
-          None, None, None, None, None, None, None, None, None, None, None,
-          None]
-
-# map of vorbis tags to attributes.  VorbisComment is a free-form
-# key/value mapping with no standard for what keys should be used, so
-# the following list is just a bunch of POSSIBLE fields.
 VORBISTAGS = {'album': 'album',
               'album artist': 'album_artist',
               'album_artist': 'album_artist',
@@ -357,6 +251,10 @@ VORBISTAGS = {'album': 'album',
               'compilation': 'compilation',
               'composer': 'composer',
               'date': 'year',
+              'disc': 'disk',
+              'disc number': 'disk',
+              'disc_number': 'disk',
+              'discnumber': 'disk',
               'disk': 'disk',
               'disk number': 'disk',
               'disk_number': 'disk',
@@ -409,13 +307,64 @@ VORBISTAGS = {'album': 'album',
               'videoepisodeid': 'video_episode_id',
               'videoseason': 'video_season',
               'videoshow': 'video_show',
+              'vol': 'volume',
+              'vol_adj': 'volume',
+              'voladj': 'volume',
               'volume': 'volume',
-              'volume adjustment': 'volume',
+              'volume_adj': 'volume',
               'volume_adjustment': 'volume',
+              'volumeadj': 'volume',
               'volumeadjustment': 'volume',
               'year': 'year'}
 
-# fields to display on dump
+IFFIDS = {'ANNO': 'comment',
+          'AUTH': 'artist',
+          'IART': 'artist',
+          'ICMT': 'comment',
+          'ICRD': 'year',
+          'INAM': 'name',
+          'NAME': 'name'}
+
+GENRES = ['Blues', 'Classic Rock', 'Country', 'Dance', 'Disco', 'Funk',
+          'Grunge', 'Hip-Hop', 'Jazz', 'Metal', 'New Age', 'Oldies', 'Other',
+          'Pop', 'R&B', 'Rap', 'Reggae', 'Rock', 'Techno', 'Industrial',
+          'Alternative', 'Ska', 'Death Metal', 'Pranks', 'Soundtrack',
+          'Euro-Techno', 'Ambient', 'Trip-Hop', 'Vocal', 'Jazz+Funk', 'Fusion',
+          'Trance', 'Classical', 'Instrumental', 'Acid', 'House', 'Game',
+          'Sound Clip', 'Gospel', 'Noise', 'Alternative Rock', 'Bass', 'Soul',
+          'Punk', 'Space', 'Meditative', 'Instrumental Pop',
+          'Instrumental Rock', 'Ethnic', 'Gothic', 'Darkwave',
+          'Techno-Industrial', 'Electronic', 'Pop-Folk', 'Eurodance', 'Dream',
+          'Southern Rock', 'Comedy', 'Cult', 'Gangsta', 'Top 40',
+          'Christian Rap', 'Pop/Funk', 'Jungle', 'Native US', 'Cabaret',
+          'New Wave', 'Psychadelic', 'Rave', 'Showtunes', 'Trailer', 'Lo-Fi',
+          'Tribal', 'Acid Punk', 'Acid Jazz', 'Polka', 'Retro', 'Musical',
+          'Rock & Roll', 'Hard Rock', 'Folk', 'Folk-Rock', 'National Folk',
+          'Swing', 'Fast Fusion', 'Bebob', 'Latin', 'Revival', 'Celtic',
+          'Bluegrass', 'Avantgarde', 'Gothic Rock', 'Progressive Rock',
+          'Psychedelic Rock', 'Symphonic Rock', 'Slow Rock', 'Big Band',
+          'Chorus', 'Easy Listening', 'Acoustic', 'Humour', 'Speech',
+          'Chanson', 'Opera', 'Chamber Music', 'Sonata', 'Symphony',
+          'Booty Bass', 'Primus', 'Porn Groove', 'Satire', 'Slow Jam', 'Club',
+          'Tango', 'Samba', 'Folklore', 'Ballad', 'Power Ballad',
+          'Rhythmic Soul', 'Freestyle', 'Duet', 'Punk Rock', 'Drum Solo',
+          'Acapella', 'Euro-House', 'Dance Hall', 'Goa', 'Drum & Bass',
+          'Club - House', 'Hardcore', 'Terror', 'Indie', 'BritPop',
+          'Negerpunk', 'Polsk Punk', 'Beat', 'Christian Gangsta Rap',
+          'Heavy Metal', 'Black Metal', 'Crossover', 'Contemporary Christian',
+          'Christian Rock', 'Merengue', 'Salsa', 'Thrash Metal', 'Anime',
+          'JPop', 'Synthpop', None, None, None, None, None, None, None, None,
+          None, None, None, None, None, None, None, None, None, None, None,
+          None, None, None, None, None, None, None, None, None, None, None,
+          None, None, None, None, None, None, None, None, None, None, None,
+          None, None, None, None, None, None, None, None, None, None, None,
+          None, None, None, None, None, None, None, None, None, None, None,
+          None, None, None, None, None, None, None, None, None, None, None,
+          None, None, None, None, None, None, None, None, None, None, None,
+          None, None, None, None, None, None, None, None, None, None, None,
+          None, None, None, None, None, None, None, None, None, None, None,
+          None]
+
 DISPLAY = [('Info',
             (('Filename', 'filename'),
              ('Name', 'name'),
@@ -451,135 +400,110 @@ DISPLAY = [('Info',
              ('Encoder', 'encoder'),
              ('Lyrics', 'lyrics')))]
 
-#########################
-### EXCEPTION CLASSES ###
-#########################
-
 class TaglibError(Exception):
 
-    """Base taglib error"""
+    pass
 
 
 class ValidationError(TaglibError):
 
-    """Raised when invalid attribute is set"""
+    pass
 
 
 class DecodeError(TaglibError):
 
-    """Raised on decoding error"""
+    pass
 
 
 class EncodeError(TaglibError):
 
-    """Raised on encoding error"""
+    pass
 
 
 class InvalidMedia(TaglibError):
 
-    """Raised if media format is invalid"""
+    pass
 
 
-#########################
-### META DATA CLASSES ###
-#########################
+DecodeErrors = (IOError, OSError, EOFError, StructError,
+                ValidationError, DecodeError)
 
 
-class MetadataContainer(MutableMapping):
-
-    """Metadata container that maps attributes to dictionary keys"""
-
-    # the upshot to this class is that the metadata object returned
-    # is more flexible than just returning a dictionary.  it will
-    # validate the attributes when set to keep data sane, allow you to
-    # refer to unset attributes without throwing an AttributeError, and
-    # shows metadata in the repr().  It also allows everything to be
-    # referred to as either a dictionary OR as instance attributes.
+class Container(MutableMapping):
 
     types = {}
 
     def __init__(self, *args, **kwargs):
-        """Accepts same arguments as dict()"""
         self.__dict__.update(dict(*args, **kwargs))
 
-    def __getattribute__(self, key):
-        """Safe attribute access"""
-        try:
-            return super(MetadataContainer, self).__getattribute__(key)
-        except AttributeError:
-            if key not in self.types:
-                raise
-
-    def __setattr__(self, key, val):
-        """Validate attributes on set"""
-        if key in self.types:
-            try:
-                val = self.validate(val, self.types[key])
-            except ValidationError, error:
-                raise ValidationError('%s: %s' % (key, error))
-        super(MetadataContainer, self).__setattr__(key, val)
-
-    def __delattr__(self, key):
-        """Safe attribute delete"""
-        if key in self.types:
-            self.validate(None, self.types[key])
-        try:
-            super(MetadataContainer, self).__delattr__(key)
-        except AttributeError:
-            if key not in self.types:
-                raise
-
     def __getitem__(self, key):
-        """Map dictionary access to attributes"""
         return self.__getattribute__(key)
 
+    def __getattribute__(self, attr):
+        try:
+            return super(Container, self).__getattribute__(attr)
+        except AttributeError:
+            if attr not in self.types:
+                raise
+
     def __setitem__(self, key, val):
-        """Map dictionary access to attributes"""
         self.__setattr__(key, val)
 
+    def __setattr__(self, attr, val):
+        val = self._validate(attr, val)
+        super(Container, self).__setattr__(attr, val)
+
     def __delitem__(self, key):
-        """Map dictionary access to attributes"""
         self.__delattr__(key)
 
+    def __delattr__(self, attr):
+        self._validate(attr)
+        try:
+            super(Container, self).__delattr__(attr)
+        except AttributeError:
+            if attr not in self.types:
+                raise
+
     def __iter__(self):
-        """Yields set metadata attributes"""
-        for key in sorted(self.types):
-            if not key.startswith('_') and self[key]:
-                yield key
+        return (attr for attr in sorted(self.types)
+                if not attr.startswith('_') and self[attr])
 
     def __len__(self):
-        """Size of set metadata attributes"""
-        return sum(1 for key in self.__iter__())
+        return sum(1 for attr in self.__iter__())
 
     def __repr__(self):
-        """String representation showing set metadata attributes"""
-        val = ', '.join('%s=%r' % item for item in self.iteritems())
-        val = (': ' if val else '') + val
-        return '<%s object at 0x%x%s>' % (type(self).__name__, id(self), val)
+        attrs = ', '.join('%s=%r' % item for item in self.iteritems())
+        return '<%s object at 0x%x%s%s>' % (
+                type(self).__name__, id(self), ': ' if attrs else '', attrs)
+
+    @classmethod
+    def _validate(cls, attr, val=None):
+        try:
+            val = cls.validate(val, cls.types[attr])
+        except KeyError:
+            pass
+        except ValidationError, error:
+            raise ValidationError('%s: %s' % (attr, error))
+        return val
 
     @staticmethod
     def validate(val, type):
-        """Validate attributes"""
         return val
 
 
-class Metadata(MetadataContainer):
-
-    """Generic result object"""
+class Metadata(Container):
 
     types = TYPES
 
     @property
     def image_sample(self):
-        """Returns first 512 bytes of image, its format, and size"""
-        image = self.image
-        if image:
+        if self.image:
             val = StringIO()
-            image.save(val, image.format)
-            return val.getvalue()[:512], image.format, image.size
+            self.image.save(val, self.image.format)
+            val.seek(0, os.SEEK_SET)
+            return val.read(512), self.image.format, self.image.size
 
-    def dump(self, width=72, stream=None, filename=None, encoding=None):
-        """Dump metadata to stream (default STDOUT)"""
+    def display(self, width=72, stream=None, filename=None, encoding=None):
         if stream is None:
             stream = sys.stdout
         if filename is None:
@@ -597,23 +521,25 @@ class Metadata(MetadataContainer):
             for name, attr in fields:
                 if attr == 'filename':
                     val = filename
-                    type = TEXT
+                    type = 'TEXT'
                 else:
                     val = self[attr]
                     type = self.types[attr]
                 if not val:
                     continue
-                if type == BOOL:
+                if type == 'BOOL':
                     val = 'Yes'
-                elif type in (GENRE, TEXT):
+                elif type in ('GENRE', 'TEXT'):
                     val = val.encode(encoding, 'ignore')
-                elif type == IMAGE:
+                elif type == 'IMAGE':
                     val = '%dx%d %s Image' % (val.size[0], val.size[1],
                                               val.format)
-                elif type in (INT32, UINT16, UINT32):
+                elif type in ('UINT16', 'UINT32'):
                     val = str(val)
-                elif type == UINT16X2:
-                    val = ('%d/%d' % val).replace('/0', '')
+                elif type == 'UINT16X2':
+                    val = ('%d/%d' % tuple(val)).replace('/0', '')
+                elif type == 'VOLUME':
+                    val = '%.1f' % val
                 if len(name) > size:
                     size = len(name)
                 lines.append((name, val))
@@ -631,409 +557,310 @@ class Metadata(MetadataContainer):
             print >> stream, 'No metadata to display'
 
     def __eq__(self, other):
-        """Test equality of metadata between two files"""
-        if not isinstance(other, BaseDecoder):
+        if not isinstance(other, Decoder):
             return NotImplemented
-        for attr, type in TYPES.iteritems():
-            if type in (DICT, IDICT, LIST):
-                continue
-            if type == IMAGE:
-                val1, val2 = self.image_sample, other.image_sample
-            else:
-                val1, val2 = self[attr], other[attr]
-            if val1 != val2:
-                return False
+        try:
+            self.compare(self, other)
+        except ValidationError:
+            return False
         return True
 
     def __ne__(self, other):
-        """Test inequality of metadata between two files"""
-        result = self.__eq__(other)
-        if result is NotImplemented:
-            return result
-        return not result
+        val = self.__eq__(other)
+        if val is NotImplemented:
+            return val
+        return not val
 
     @staticmethod
     def validate(val, type):
-        raise ValidationError('read-only')
+        raise ValidationError('metadata is read-only')
+
+    @staticmethod
+    def compare(src, dst):
+        for attr, type in TYPES.iteritems():
+            if attr.startswith('_'):
+                continue
+            if type == 'IMAGE':
+                val1, val2 = src.image_sample, dst.image_sample
+            else:
+                val1, val2 = src[attr], dst[attr]
+            if val1 != val2:
+                raise ValidationError('%s: %r != %r' % (attr, val1, val2))
 
 
-################
-### DECODERS ###
-################
-
-
-class FlexOpen(object):
-
-    """Flexible open context that accepts path, descriptor, or fileobj"""
-
-    # pretty self-explanatory.  I found the open() method a little
-    # inflexible.  Using this instead is more duck-type-ish.  For
-    # example, when setting obj.image, you can give it a path to a file,
-    # an already open file, a StringIO object, etc.  It also keeps track
-    # of the seek position if the file is external and go back to its
-    # original spot when the context exits, or can be instructed to NOT
-    # close the file when it's done, which is handy for keeping the
-    # original object open for future read/write.
+class Open(object):
 
     def __init__(self, file, mode='rb', close=True):
-        """
-        file    - a path, descriptor, or fileobj
-        mode    - mode to open with (does not apply to fileobj's)
-        close   - if a path is provided, whether to close when done
-        """
-        if isinstance(file, basestring):
-            self.fp = open(file, mode)
-            self.external = False
-        elif isinstance(file, (int, long)):
-            self.fp = os.fdopen(file, mode)
-            self.external = True
-        elif hasattr(file, 'seek'):
-            self.fp = file
-            self.external = True
-        else:
-            raise TypeError('file must be a path, descriptor, or fileobj')
+        self.file = file
+        self.mode = mode
         self.close = close
+        self.fp = None
+        self.pos = None
 
     def __enter__(self):
-        """Enter open context"""
+        if isinstance(self.file, basestring):
+            self.fp = open(self.file, self.mode)
+            self.external = False
+        elif isinstance(self.file, (int, long)):
+            self.fp = os.fdopen(self.file, self.mode)
+            self.external = True
+        elif hasattr(self.file, 'seek'):
+            self.fp = self.file
+            self.external = True
+        else:
+            raise TypeError('file must be a path, descriptor, or open file')
         if self.external:
             self.pos = self.fp.tell()
         return self.fp
 
     def __exit__(self, *args):
-        """Exit open context"""
         if self.external:
             self.fp.seek(self.pos, os.SEEK_SET)
         elif self.close:
             self.fp.close()
 
 
-class BaseDecoder(Metadata):
-
-    """Base decoder class"""
-
-    # implements methods shared by all decoders but doesn't
-    # do anything useful on its own.
+class Decoder(Metadata):
 
     format = None
-    close = True
+    editable = False
 
-    def __init__(self, file, offset=0):
-        """
-        file    - path, descriptor, or fileobj
-        offset  - position to start decoding
-        """
-        with FlexOpen(file, 'rb', self.close) as fp:
+    genre_re = re.compile(r'^\((\d+)\)$')
+
+    uint32be = Struct('>L')
+    int16be = Struct('>h')
+    uint16be = Struct('>H')
+    longbytes = Struct('4B')
+
+    def __init__(self, file):
+        if self.editable:
+            close = False
+            mode = 'rb+'
+        else:
+            close = True
+            mode = 'rb'
+        with Open(file, mode, close) as fp:
+            self.fp = fp
             try:
-                self.decode(fp, offset)
-            except SafeErrors, error:
+                self.decode()
+            except DecodeErrors, error:
                 raise InvalidMedia(error)
-            if not self.close:
-                self.fp = fp
+        self.changed = False
 
-    def decode(self, fp, offset=0):
-        """Decode open file starting at offset"""
-        raise DecodeError('not implemented')
+    def decode(self):
+        raise DecodeError('no decoder implemented')
 
-    def save(self, file):
-        """Save to file with updated metadata"""
-        raise EncodeError('not suppported for %s format' % self.format)
+    def save(self):
+        raise EncodeError('encoder not implemented')
 
-    @staticmethod
-    def getbufread(fp, size=None, blocksize=None):
-        """Create callback to perform buffered I/O"""
-        pos = fp.tell()
-        if size is None:
-            fp.seek(0, os.SEEK_END)
-            size = fp.tell()
-            fp.seek(pos, os.SEEK_SET)
-        if blocksize is None:
-            blocksize = BLOCKSIZE
-        state = {'size': size, 'pos': pos, 'buf': []}
-        bufsize = lambda: sum(len(item) for item in state['buf'])
+    def dump(self, file):
+        raise EncodeError('encoder not implemented')
 
-        def read(size):
-            if size > state['size']:
-                size = state['size']
-            while bufsize() < size:
-                val = fp.read(blocksize)
-                if not val:
-                    break
-                state['buf'].append(val)
-            val = ''.join(state['buf'])
-            val, state['buf'] = val[:size], [val[size:]]
-            read = len(val)
-            state['pos'] += read
-            if read < size:
-                state['size'] = 0
-            else:
-                state['size'] -= read
-            return val
+    def dumps(self):
+        raise EncodeError('encoder not implemented')
 
-        read.state = state
-        return read
+    def __setattr__(self, attr, val):
+        super(Decoder, self).__setattr__(attr, val)
+        if attr in self.types:
+            self.changed = True
 
-    @staticmethod
-    def validate(val, type):
-        """Validate/transform attributes"""
+    def __delattr__(self, attr):
+        super(Decoder, self).__delattr__(attr)
+        if attr in self.types:
+            self.changed = True
+
+    @classmethod
+    def validate(cls, val, type):
         if val is not None:
-            if type in (UINT16, INT32, UINT32):
+            if type == 'BOOL':
+                if isinstance(val, basestring):
+                    if isinstance(val, unicode):
+                        val = val.encode('ascii', 'ignore').strip()
+                    val = val.lower().strip()
+                    for result, vals in BOOLS.iteritems():
+                        if val in vals:
+                            val = result
+                            break
+                    else:
+                        raise ValidationError('invalid boolean string')
+            elif type == 'GENRE':
+                if isinstance(val, (int, long)):
+                    if val < 0 or val > 0xff:
+                        raise ValidationError('out of range')
+                    val = GENRES[val]
+                type = 'TEXT'
+            elif type == 'UINT16':
                 if isinstance(val, basestring):
                     try:
                         val = int(val)
-                    except (ValueError, TypeError), error:
+                    except ValueError, error:
                         raise ValidationError(error)
                 elif not isinstance(val, (int, long)):
-                    raise ValidationError('must be an integer')
-            elif type == GENRE:
-                if isinstance(val, (int, long)):
-                    try:
-                        val = GENRES[val]
-                    except IndexError, error:
-                        raise ValidationError(error)
-                    if not val:
-                        raise ValidationError('unknown genre')
-            if type in (TEXT, GENRE):
-                if isinstance(val, str):
-                    val = list(val)
-                    while val and val[-1] in ' \x00':
-                        val.pop()
-                    val = ''.join(val).decode('ascii', 'ignore')
-                elif not isinstance(val, unicode):
-                    val = unicode(val)
-                val = val.strip()
-            elif type == UINT16:
-                if val < 0 or val > 0xffff:
-                    raise ValidationError('out of range of uint16')
-            elif type == INT32:
-                if val < -0x80000000 or val > 0x7fffffff:
-                    raise ValidationError('out of range of int32')
-            elif type == UINT16X2:
-                if isinstance(val, basestring):
-                    val = [int(item) if item.isdigit() else 0
-                           for item in val.split('/')]
-                elif isinstance(val, (int, long)):
-                    val = val, 0
-                if isinstance(val, list):
-                    val = tuple(val)
-                elif not isinstance(val, tuple):
-                    raise ValidationError('must be 2 uint16s')
-                if len(val) == 1:
-                    val = val[0], 0
-                elif len(val) != 2:
-                    raise ValidationError('must be 2 uint16s')
-                if val[0] == -1:
-                    val = 0, val[1]
-                if val[1] == -1:
-                    val = val[0], 0
-                if (not isinstance(val[0], (int, long)) or
-                    not isinstance(val[1], (int, long)) or
-                    val[0] < 0 or val[0] > 0xffff or
-                    val[1] < 0 or val[1] > 0xffff):
-                    raise ValidationError('must be 2 uint16s')
-                if val == (0, 0):
-                    val = None
-            elif type == BOOL:
-                if isinstance(val, basestring):
-                    val = val.lower().strip()
-                    if val in ('yes', 'y', 'true', 't', 'on', '1', '\x01'):
-                        val = True
-                    elif val in ('no', 'n', 'false', 'f', 'off', '0', '\x00'):
-                        val = False
-                    else:
-                        raise ValidationError('must be boolean')
-                elif isinstance(val, (int, long)):
-                    val = bool(val)
-                elif not isinstance(val, bool):
-                    raise ValidationError('must be boolean')
-            elif type == IMAGE:
-                if Image is None:
-                    raise ValidationError('PIL support required')
-                if not isinstance(val, ImageFile):
-                    try:
-                        with FlexOpen(val, 'rb') as fp:
-                            val = Image.open(fp)
-                            val.load()
-                    except (TypeError, IOError), error:
-                        raise ValidationError(error)
-            elif type in (DICT, IDICT):
+                    raise ValidationError('must be a numeric value')
+            if type in ('DICT', 'IDICT'):
                 if not isinstance(val, dict):
                     raise ValidationError('must be a dictionary')
-            elif type == UINT32:
-                if val < 0 or val > 0xffffffff:
-                    raise ValidationError('out of range of uint32')
-            elif type == LIST:
-                if not isinstance(val, list):
-                    raise ValidationError('must be a list')
-            else:
-                raise NotImplementedError(type)
-            if not val and type not in (DICT, IDICT, LIST):
+            elif type == 'IMAGE':
+                if not PIL:
+                    raise ValidationError('must install PIL for image support')
+                if not isinstance(val, ImageFile):
+                    try:
+                        with Open(val, 'rb') as fp:
+                            val = Image.open(fp)
+                            val.load()
+                    except (IOError, TypeError), error:
+                        raise ValidationError(error)
+            elif type == 'VOLUME':
+                if isinstance(val, basestring):
+                    try:
+                        val = float(val)
+                    except ValueError, error:
+                        raise ValidationError(error)
+                elif isinstance(val, (int, long)):
+                    val = float(val)
+                elif not isinstance(val, float):
+                    raise ValidationError('must be a float value')
+                if val < -99.9:
+                    val = -99.9
+                if val > 100.0:
+                    val = 100.0
+            elif type == 'TEXT':
+                if val:
+                    if not isinstance(val, unicode):
+                        if not isinstance(val, str):
+                            val = str(val)
+                        val = val.decode('ascii', 'ignore')
+                    val = cls.unpad(val)
+            elif type == 'UINT16':
+                if val < 0 or val > 0xffff:
+                    raise ValidationError('out of range of uint16')
+            elif type == 'UINT16X2':
+                if isinstance(val, basestring):
+                    val = [int(i) if i.isdigit() else 0 for i in val.split('/')]
+                elif isinstance(val, (int, long)):
+                    val = val, 0
+                if isinstance(val, tuple):
+                    val = list(val)
+                elif not isinstance(val, list):
+                    raise ValidationError('must be a sequence of start/end')
+                if len(val) == 1:
+                    val.append(0)
+                elif len(val) != 2:
+                    raise ValidationError('must be a sequence of start/end')
+                if val[0] < 0:
+                    val[0] = 0
+                if val[1] < 0:
+                    val[1] = 0
+                if val[0] > 0xffff or val[1] > 0xffff:
+                    raise ValidationError('must be in range of uint16')
+                if val == [0, 0]:
+                    val = None
+            if type not in ('DICT', 'IDICT') and not val:
                 val = None
         return val
 
+    @staticmethod
+    def unpad(val):
+        val = list(val)
+        while val and val[-1] in ' \x00':
+            val.pop()
+        return ''.join(val)
 
-class MP3(BaseDecoder):
 
-    """Decodes ID3v1/ID3v2 tags on MP3 files"""
-
-    # A rant on this decoder to developers:
-    #
-    # ID3V2 IS THE WORST FUCKING THING IN THE WORLD. OH MY GOD.
-    #
-    # Not sure what else I can say about this.  It is complicated,
-    # convoluted, and insufficiently outlines its exact implementation
-    # in many places.  It is curiously over-engineered in areas of
-    # questionable usefulness while totally lacking in critical ones.  I
-    # am fairly certain the author of ID3v2 is on lots of speed,
-    # clinically insane, or both.
-    #
-    # The result is that various applications that read/write ID3V2 tags
-    # are, at best, interpretations of the spec.  Parts of it are
-    # outright ignored, some add their own "custom" fields, some stuff
-    # is just plain wrong.
-    #
-    # This decoder was developed partly using the spec on id3.org,
-    # partly using iTunes interpretation of ID3v2, and partly by running
-    # this across my ~30G library and correcting for any problems it
-    # encountered, while chucking out metadata fields I deemed useless.
-    #
-    # I originally flirted with the idea of just stashing the contents
-    # of unsupported tags somewhere so that they could be written back
-    # unmolested, and may do that in the future, or make it an option.
-    # I remain unconvinced this is worth the effort.
-    #
-    # Some stuff I REFUSE to implement, in no particular order:
-    #
-    # - The ability to define 20 different URL's (W___ frames).  How is
-    #   this useful?  I mean, who cares?  Look it up on google ffs.
-    #   These are just text fields and no problem to add to the code, I
-    #   am just not doing it because it's fucking stupid.  In my own
-    #   library, the files that used these are full of links that are
-    #   404 now, which is another problem with storing URLs in the
-    #   metadata.
-    #
-    # - Externally import tags from other files by reference.  That is
-    #   just INSANE.  The whole point of metadata on a file is so that
-    #   it follows the file around wherever it goes.  Pointing the metadata
-    #   TO ANOTHER FILE defeats the whole purpose.
-    #
-    # - Nearly every frame that defines how the actual MP3 data should
-    #   be played back, like reverb, equalization, recommended buffer
-    #   size, seek points, etc.  This makes no sense to store on the file,
-    #   is very complicated, and in not honored by any mp3 player I know
-    #   of.  The one exception I made to this is the "volume adjustment"
-    #   field (RVAD/RVA/RVA2).  This is fairly useful and iTunes does make
-    #   use of it.  However I do not honor the full spec which allows
-    #   separate settings for different channels.  This decoder only looks
-    #   for the first volume adjustment specified and uses that.  When
-    #   writing back, it will save that adjustment in the tag for both the
-    #   right and left channel.  Peak value field is ignored completely.
-    #   This is, as far as I can tell, how iTunes uses the tag anyway.
-    #   That is, its volume slider effects both channels, and are stored
-    #   that way on the tag.  Sorry if your player works differently.
-    #   Implementing this feature completely isn't very hard, I just
-    #   didn't see the point.  My mind could be changed on this matter
-    #   if anyone cared to make a case.
-    #
-    # - Any fields pertaining to copyright/terms of use/ownership.  Show
-    #   me one person who cares about this and I'll eat my hat.  I don't
-    #   even wear a hat, so I'll go buy one for this occasion.  Chances
-    #   are if you have an MP3 file that you didn't rip yourself, it's
-    #   pirated anyway, so what use is keeping track of who you ripped
-    #   off?  :P
-    #
-    # - Fields which allow arbitrary binary objects to be attached (e.g.
-    #   the GEOB tag).  What kind of binary object would be useful to
-    #   attach to an MP3 besides an image file, which already has its
-    #   own frame?!  The spec addresses the how, but not the WHY.
-    #
-    # - ANY HEADER FLAGS WHATSOEVER.  This includes:
-    #
-    #   * Encryption (WTF? WHY WOULD YOU WANT TO ENCRYPT METADATA?!)
-    #
-    #   * Repacking tag on the fly to make it "syncsafe". As if there's
-    #     any functional MP3 decoder that can't tell a valid MP3 frame
-    #     from a stray 11bit syncword.  Maybe this was useful at some
-    #     point, but it's just pointless now.  Still, I note that some
-    #     very old files in my MP3 library have this flag set.  My
-    #     decoder just ignores it.  There is only one case I can think
-    #     of where a syncword would show up in a field, and that is in
-    #     an attached image file.  So, I'm sorry, you'll lose the image
-    #     field trying to decode these if the ID3 tag marks it syncsafe.
-    #     I didn't find many that do this except for very old MP3s.  I
-    #     think it's worth the loss just to avoid complicating the code
-    #     further.
-    #
-    #   * CRC-checks.  Look, if an ID3 tag is corrupted, you'll figure
-    #     that out pretty quickly while trying to read the damn thing.
-    #
-    #   * Frame-specific flags that define whether a particular frame
-    #     should be chucked when the tag is updated.  They implemented
-    #     this because they knew a tag that, for example, contained the
-    #     filesize would become bogus if you changed any other part of the
-    #     tag.  The solution to this is not store volatile information
-    #     like filesize in the tag at all, not provide a workaround.
-    #     You can figure out the filesize by, you know, LOOKING AT HOW
-    #     BIG THE FILE IS, which is a less expensive operation than
-    #     decoding an ID3 tag by far.
-    #
-    #   * Extended headers and the "footer" field.  I couldn't find a
-    #     single file in my library that contained these, and my library
-    #     is, I think, a pretty representative sample of encoders in use
-    #     over the past decade.  The fact that the extended header is
-    #     full of useless shit like "tag restrictions", I can see why no
-    #     one bothered with it.  Good riddance.
-    #
-    # I could go on and on about how terrible ID3v2 is.  It just defies
-    # imagination.  I am SO SO SORRY if you are reading this because you
-    # are writing your own ID3v2 encoder.  My honest advice is to not
-    # bother unless you hate yourself like I do.  TURN BACK BEFORE IT'S
-    # TOO LATE!
+class MP3(Decoder):
 
     format = 'mp3'
-    close = False
-    genre_re = re.compile(r'^\((\d+)\)$')
-    tag_re = re.compile(r'^[0-9A-Z ]{3,4}$')
+    editable = True
 
-    ######################################
-    ### managed-dict related functions ###
-    ######################################
+    id3v1 = Struct('3s30s30s30s4s30sB')
+    id3v2 = Struct('3s3B4s')
 
-    # following functions are to deal with the fact that
-    # several ID3v2 tags can have multiple versions with different
-    # "content descriptions" or languages.  even though I think this is
-    # a retarded idea, it needs to be implemented in some capacity,
-    # otherwise I'd have to throw out some important metadata like
-    # comments, lyrics, artwork, etc.  iTunes, at least, uses the
-    # comment field with different content keys to store data for which
-    # there is no id3v2-defined tag (such as gapless playback).
-    #
-    # that said, these fields are implemented as properties so that they
-    # behave like the other decoders when accessed.  If you need to get
-    # to a specific comment or lyric that ISN'T english with the content
-    # description empty, you will need to call get_comment or get_lyrics
-    # with the appropriate keyword arguments.  If you copy this metadata
-    # to another decoder class that doesn't support multiple values,
-    # all of these will be lost except for the english+empty-descriptor
-    # and the gapless playback setting itunes uses.
-    #
-    # one other thing to note:  Any of these can be called with the
-    # ANYITEM keyword, which will return any item it finds.  If you have
-    # more than one, this is kind of arbitrary.  The reason I do this is
-    # because some stuff (especially attached images) have
-    # unexpected/arbitrary keys, so this lets you say "I don't care what
-    # key they used, JUST GIVE ME AN IMAGE."
-    #
-    # one possible change here is to make it default to this behavior if
-    # and only if it couldn't find the named one.
+    tag_re = re.compile(r'^[A-Z0-9 ]{3,4}$')
 
-    def __init__(self, *args, **kwargs):
-        self.version = None
-        self.has_mp3data = False
-        super(MP3, self).__init__(*args, **kwargs)
+    fakemp3 = '\xff\xf2\x14\x00' * 13
+
+    def __init__(self, file):
+        self.hasid3v2 = False
+        self.id3v2start = None
+        self.id3v2end = None
+        self.id3v2version = None
+
+        self.hasmp3 = False
+        self.mp3start = None
+
+        self.hasid3v1 = False
+        self.id3v1start = None
+        self.id3v1end = None
+
+        super(MP3, self).__init__(file)
+
+    def get_gapless(self):
+        return self.get_comment(GAPLESS)
+
+    def set_gapless(self, val):
+        self.set_comment(val, GAPLESS)
+
+    def del_gapless(self):
+        self.del_comment(GAPLESS)
+
+    gapless = property(get_gapless, set_gapless, del_gapless)
+
+    def get_comment(self, key=None, lang='eng'):
+        if key != ANYITEM:
+            key = lang, key
+        return self.getdict('_comment', key)
+
+    def set_comment(self, val, key=None, lang='eng'):
+        if key == GAPLESS:
+            val = self.validate(val, 'BOOL')
+        else:
+            val = self.validate(val, 'TEXT')
+        self.setdict('_comment', (lang, key), val)
+
+    def del_comment(self, key=None, lang='eng'):
+        if key != ANYITEM:
+            key = lang, key
+        self.deldict('_comment', key)
+
+    comment = property(get_comment, set_comment, del_comment)
+
+    def get_lyrics(self, key=None, lang='eng'):
+        if key != ANYITEM:
+            key = lang, key
+        return self.getdict('_lyrics', key)
+
+    def set_lyrics(self, val, key=None, lang='eng'):
+        if key == GAPLESS:
+            val = self.validate(val, 'BOOL')
+        else:
+            val = self.validate(val, 'TEXT')
+        self.setdict('_lyrics', (lang, key), val)
+
+    def del_lyrics(self, key=None, lang='eng'):
+        if key != ANYITEM:
+            key = lang, key
+        self.deldict('_lyrics', key)
+
+    lyrics = property(get_lyrics, set_lyrics, del_lyrics)
+
+    def get_image(self, key=ANYITEM):
+        if key != ANYITEM:
+            key = key,
+        val = self.getdict('_image', key)
+        if val:
+            return val[0]
+
+    def set_image(self, val, key=None, ptype=3):
+        self.setdict('_image', (key,), (self.validate(val, 'IMAGE'), ptype))
+
+    def del_image(self, key=ANYITEM):
+        if key != ANYITEM:
+            key = key,
+        self.deldict('_image', key)
+
+    image = property(get_image, set_image, del_image)
 
     def getdict(self, attr, key):
-        """Get managed dict item"""
         dict = self[attr]
         if dict:
             if key == ANYITEM:
@@ -1041,7 +868,6 @@ class MP3(BaseDecoder):
             return dict.get(key)
 
     def setdict(self, attr, key, val):
-        """Set managed dict item"""
         if val is None:
             self.deldict(attr, key)
         else:
@@ -1051,7 +877,6 @@ class MP3(BaseDecoder):
             dict[key] = val
 
     def deldict(self, attr, key):
-        """Delete managed dict item"""
         dict = self[attr]
         if dict:
             if key == ANYITEM:
@@ -1059,467 +884,436 @@ class MP3(BaseDecoder):
             try:
                 del dict[key]
                 if not dict:
-                    self[attr] = None
+                    del self[attr]
             except KeyError:
                 pass
 
-    def get_image(self, key=ANYITEM):
-        """Get named image (default: any)"""
-        if key != ANYITEM:
-            key = (key,)
-        val = self.getdict('_image', key)
-        if val:
-            return val[0]
-
-    def set_image(self, val, key=None, ptype=3):
-        """Set named image"""
-        val = self.validate(val, IMAGE)
-        if val:
-            val = val, ptype
-        self.setdict('_image', (key,), val)
-
-    def del_image(self, key=ANYITEM):
-        """Delete named image"""
-        if key != ANYITEM:
-            key = (key,)
-        self.deldict('_image', key)
-
-    image = property(get_image, set_image, del_image)
-
-    def get_comment(self, lang='eng', key=None):
-        """Get named comment"""
-        if key != ANYITEM:
-            key = lang, key
-        return self.getdict('_comment', key)
-
-    def set_comment(self, val, lang='eng', key=None):
-        """Set named comment"""
-        if key == GAPLESS:
-            val = self.validate(val, BOOL)
-        else:
-            val = self.validate(val, TEXT)
-        self.setdict('_comment', (lang, key), val)
-
-    def del_comment(self, lang='eng', key=None):
-        """Delete named comment"""
-        if key != ANYITEM:
-            key = lang, key
-        self.deldict('_comment', key)
-
-    comment = property(get_comment, set_comment, del_comment)
-
-    def get_gapless(self):
-        """Get gapless playback setting"""
-        return self.get_comment(key=GAPLESS)
-
-    def set_gapless(self, val):
-        """Set gapless playback setting"""
-        self.set_comment(val, key=GAPLESS)
-
-    def del_gapless(self):
-        """Delete gapless playback setting"""
-        self.del_comment(key=GAPLESS)
-
-    gapless = property(get_gapless, set_gapless, del_gapless)
-
-    def get_lyrics(self, lang='eng', key=None):
-        """Get named lyrics"""
-        if key != ANYITEM:
-            key = lang, key
-        return self.getdict('_lyrics', key)
-
-    def set_lyrics(self, val, lang='eng', key=None):
-        """Set named lyrics"""
-        val = self.validate(val, TEXT)
-        self.setdict('_lyrics', (lang, key), val)
-
-    def del_lyrics(self, lang='eng', key=None):
-        """Delete named lyrics"""
-        if key != ANYITEM:
-            key = lang, key
-        self.deldict('_lyrics', key)
-
-    lyrics = property(get_lyrics, set_lyrics, del_lyrics)
-
-    def get_mp3data(self, blocksize=None):
-        """Yields blocks of mp3data"""
-        if not self.has_mp3data:
-            raise ValueError('no mp3 data')
-        if blocksize is None:
-            blocksize = BLOCKSIZE
-        pos = self.fp.tell()
-        try:
-            self.fp.seek(self.mp3start)
-            bytes_left = self.mp3size
-            while bytes_left:
-                size = bytes_left if blocksize > bytes_left else blocksize
-                val = self.fp.read(size)
-                if not val:
+    @property
+    def mp3frames(self):
+        if self.hasmp3:
+            self.fp.seek(self.mp3start, os.SEEK_SET)
+            while True:
+                head = self.fp.read(4)
+                try:
+                    yield head + self.fp.read(self.framelen(head) - 4)
+                except DecodeErrors:
                     break
-                bytes_left -= len(val)
-                yield val
-        finally:
+
+    def decode(self):
+        try:
+            self.decode_id3v1()
+        except DecodeErrors:
+            pass
+        try:
+            self.decode_id3v2()
+        except DecodeErrors:
+            pass
+        try:
+            if self.hasid3v2:
+                pos = self.id3v2end
+            else:
+                pos = 0
+            self.decode_mp3(pos)
+        except DecodeErrors:
+            pass
+        if not self.hasid3v1 and not self.hasid3v2 and not self.hasmp3:
+            raise DecodeError('no tags or mp3 data found')
+
+    def decode_id3v2(self, pos=None):
+        if pos is None:
+            pos = 0
+        try:
             self.fp.seek(pos, os.SEEK_SET)
-
-    mp3data = property(get_mp3data)
-
-    ##################################
-    ### decoding-related functions ###
-    ##################################
-
-    # first we decode id3v1, if it exists, then id3v2, which can
-    # override these values, since it's a more comprehensive spec.
-
-    def decode(self, fp, offset=0):
-        """Decodes ID3v1/ID3v2 tags on open MP3 file"""
-        try:
-            self.decode_id3v1(fp)
-        except SafeErrors:
-            pass
-        mp3end = fp.tell()
-        try:
-            self.decode_id3v2(fp, offset)
-        except SafeErrors:
-            pass
-        self.seekmp3(fp)
-        self.has_mp3data = True
-        self.mp3start = fp.tell()
-        self.mp3size = mp3end - self.mp3start
-
-    def decode_id3v1(self, fp):
-        """Decode ID3v1 tag"""
-        try:
-            fp.seek(-128, os.SEEK_END)
-            val = unpack('3s30s30s30s4s30sB', fp.read(128))
-            if val[0] != 'TAG':
-                raise DecodeError('no id3v1 tag')
-            fp.seek(-128, os.SEEK_END)
-        except SafeErrors:
-            fp.seek(0, os.SEEK_END)
-            raise
-        try:
-            self.name, self.artist, self.album, self.year = val[1:5]
-        except ValidationError:
-            pass
-        if val[5][28] in ' \x00' and val[5][29] != '\x00':
-            self.comment = val[5][:28]
-            self.track = ord(val[5][29])
-        else:
-            self.comment = val[5]
-        self.genre = val[6]
-
-    def decode_id3v2(self, fp, offset=0):
-        """Decode ID3v2 tag"""
-
-        # note: some of the decoding legwork is handled by the
-        # validate() method in BaseDecoder, such as converting the
-        # pre-defined GENRE index to the actual genre or parsing the
-        # '3/4' syntax for track number. also see the static helper
-        # functions at the end of this class.
-
-        try:
-            fp.seek(offset, os.SEEK_SET)
-        except IOError:
-            fp.seek(0, os.SEEK_SET)
-            raise
-        read = self.getbufread(fp, size=10)
-        try:
-            head, version, revision, flags, size = unpack('3s3B4s', read(10))
-            if head != 'ID3':
+            head = self.id3v2.unpack(self.fp.read(self.id3v2.size))
+            if head[0] != 'ID3':
                 raise DecodeError('no id3v2 tag')
-            if version not in ID3TAGS:
-                raise DecodeError('unknown version: %d' % version)
-            self.version = version
-            taglen, sizelen, flagslen, syncsafe, ids = ID3TAGS[version]
-
-            # XXX getting all pissy about these two fields is probably
-            # not worth it.  In theory, revision SHOULD be 0 (because
-            # the spec says so) and flags SHOULD be 0 (since I don't
-            # implement any of the behavior they define).  In reality,
-            # we can just try to decode anyway and hope for the best.
-            #
-            # if revision:
-            #     raise DecodeError('unknown revision: %d' % revision)
-            # if flags:
-            #     raise DecodeError('unknown flags: %d' % flags)
-
-        except SafeErrors:
-            fp.seek(offset, os.SEEK_SET)
+            if head[1] not in ID3V2OPTS:
+                raise DecodeError('unknown version: %d' % head[1])
+            if head[2]:
+                raise DecodeError('unknown revision: %d' % head[2])
+            self.hasid3v2 = True
+            self.id3v2start = pos
+            self.id3v2version = head[1]
+        except DecodeErrors:
+            self.hasid3v2 = False
+            self.id3v2start = None
+            self.id3v2end = None
+            self.id3v2version = None
             raise
-        read.state['size'] = self.getint(size, syncsafe=True)
-        while read.state['size']:
+        bytes_left = self.getint(head[4], syncsafe=True)
+        self.id3v2end = self.fp.tell() + bytes_left
+        frame = ID3V2OPTS[self.id3v2version]['frame']
+        syncsafe = ID3V2OPTS[self.id3v2version]['syncsafe']
+        while bytes_left > frame.size:
             try:
-                tag = read(taglen)
+                tag, size, flags = frame.unpack(self.fp.read(frame.size))
                 if not self.tag_re.search(tag):
-                    read.state['size'] = 0
-                    read.state['pos'] -= len(tag)
-                    raise DecodeError('invalid tag')
-                size = self.getint(read(sizelen), syncsafe)
-                flags = self.getint(read(flagslen))
-                val = read(size)
+                    break
+                size = self.getint(size, syncsafe)
+                val = self.fp.read(size)
+                bytes_left -= (frame.size + size)
                 if not val:
-                    raise DecodeError('empty value')
-                attr = ids.get(tag)
-                if not attr:
-                    self.__dict__.setdefault('_unknown', []).append((tag, val))
-                    raise DecodeError('unknown tag')
+                    continue
+                try:
+                    attr = ID3V2TAGS[tag]
+                except KeyError:
+                    tags = self.getdict('_unknown', tag)
+                    if not tags:
+                        tags = []
+                        self.setdict('_unknown', tag, tags)
+                    tags.append(val)
+                    continue
                 type = self.types[attr]
                 key = None
-                if type in (BOOL, GENRE, TEXT, UINT16, UINT16X2):
+                if type in ('BOOL', 'GENRE', 'TEXT', 'UINT16', 'UINT16X2'):
                     val = self.getstr(val)
                 if not val:
-                    raise DecodeError('empty value')
-                if type == DICT:
-                    ebyte, lang = val[0], val[1:4]
-                    key, val = self.split(val[4:], ENCODINGS[ebyte][1], 1)
-                    key = lang, self.validate(self.getstr(ebyte + key), TEXT)
-                    val = self.validate(self.getstr(ebyte + val), TEXT)
-                    if key[1] == GAPLESS:
-                        val = self.validate(val, BOOL)
-                elif type == GENRE:
-                    # id3v2 can reference to the id3v1 pre-defined genres by
-                    # storing (20) or whatever.
+                    continue
+                if type == 'DICT':
+                    ebyte, val, encoding, term = self.splitenc(val)
+                    lang = val[:3]
+                    key, val = self.splitstr(val[3:], term, offset=1)
+                    key = self.validate(self.getstr(ebyte + key), 'TEXT')
+                    if key == GAPLESS:
+                        val = self.validate(self.getstr(ebyte + val), 'BOOL')
+                    else:
+                        val = self.validate(self.getstr(ebyte + val), 'TEXT')
+                    key = lang, key
+                elif type == 'GENRE':
                     try:
                         val = int(self.genre_re.search(val).group(1))
                     except AttributeError:
                         pass
-                elif type == IDICT:
-                    ebyte, val = val[0], val[1:]
-                    if tag == 'APIC':
-                        val = self.split(val, offset=1)[1]
-                    else:
+                elif type == 'IDICT':
+                    ebyte, val, encoding, term = self.splitenc(val)
+                    if tag == 'PIC':
                         val = val[3:]
-                    ptype, val = ord(val[0]), val[1:]
-                    key, val = self.split(val, ENCODINGS[ebyte][1], offset=1)
-                    key = (self.validate(self.getstr(ebyte + key), TEXT),)
-                    val = self.validate(StringIO(val), IMAGE), ptype
-                elif type == INT32:
-                    # limited implementation of volume adjustment tag.
-                    # see the rant at the top of this class for an
-                    # explanation why I didn't fully implement it.
+                    else:
+                        val = self.splitstr(val, offset=1)[1]
+                    ptype = ord(val[0])
+                    key, val = self.splitstr(val[1:], term, offset=1)
+                    key = self.validate(self.getstr(ebyte + key), 'TEXT'),
+                    val = self.validate(StringIO(val), 'IMAGE'), ptype
+                elif type == 'VOLUME':
                     if tag == 'RVA2':
-                        val = self.split(val, offset=1)[1][1:3]
-                        val = int(unpack('>h', val)[0] * RVA2FACTOR)
+                        val = self.splitstr(val, offset=1)[1][1:3]
+                        val = self.int16be.unpack(val)[0]
+                        val = round(100 * (10 ** (val / 512.0 / 20) - 1), 1)
                     else:
                         pos, bits = ord(val[0]) & 1, ord(val[1])
-                        i, r = divmod(bits, 8)
-                        if r:
-                            i += 1
-                        val = self.getint(val[2:2 + i])
+                        val = self.getint(val[2:2 + int((bits + 7) / 8)])
+                        val = round(float(val) / ((1 << bits) - 1) * 100, 1)
                         if not pos:
                             val *= -1
                 if not val:
-                    raise DecodeError('empty value')
-                if key:
-                    self.setdict(attr, key, val)
-                else:
-                    self[attr] = val
-            except SafeErrors:
-                pass
-        fp.seek(read.state['pos'], os.SEEK_SET)
-
-
-    ##################################
-    ### encoding-related functions ###
-    ##################################
-
-    def save(self, file, version=None, keep_unknown=False):
-        """Save mp3 with updated metadata to file"""
-        if not self.has_mp3data:
-            raise EncodeError('no mp3 data')
-        if version is None:
-            version = self.version
-        if version is None:
-            version = ID3VERSION
-        if version not in ID3TAGS:
-            raise EncodeError('unsupported id3 version')
-        if self._unknown and keep_unknown and version != self.version:
-            raise EncodeError('version must be %d to keep unknown' %
-                              self.version)
-        with FlexOpen(file, 'wb') as fp:
-            self.encode(fp, version, keep_unknown)
-        # return fp so we can do tagopen(obj.save(StringIO()))  :P
-        return fp
-
-    def encode(self, fp, version=2, keep_unknown=False):
-        """Encode mp3/metadata to open file"""
-        id3v1 = id3v2 = False
-        for attr in ID3V2FIELDS:
-            if self[attr]:
-                id3v2 = True
-                if attr in ID3V1FIELDS:
-                    id3v1 = True
-                    break
-        if not id3v2 and keep_unknown and self._unknown:
-            id3v2 = True
-        if id3v2:
-            self.encode_id3v2(fp, version, keep_unknown)
-        for val in self.mp3data:
-            fp.write(val)
-        if id3v1:
-            self.encode_id3v1(fp)
-
-    def encode_id3v1(self, fp):
-        """Encode ID3v1 tag to open file"""
-        val = ['TAG', self.pad(self.name), self.pad(self.artist),
-               self.pad(self.album), self.pad(self.year, 4)]
-        if self.track and self.track[0] and self.track[0] < 256:
-            val += [self.pad(self.comment, 28), '\x00', chr(self.track[0])]
-        else:
-            val.append(self.pad(self.comment))
-        if self.genre and self.genre in GENRES:
-            val.append(chr(GENRES.index(self.genre)))
-        else:
-            val.append('\xff')
-        fp.write(''.join(val))
-
-    def encode_id3v2(self, fp, version=2, keep_unknown=False):
-        """Encode ID3v2 tag to open file"""
-        head = fp.tell()
-        fp.write(pack('>3s3BL', 'ID3', version, 0, 0, 0))
-        size = 0
-        for val in self.get_id3v2_tags(version, keep_unknown):
-            fp.write(val)
-            size += len(val)
-        pos = fp.tell()
-        try:
-            fp.seek(head + 6)
-            fp.write(self.getbytes(size, syncsafe=True))
-        finally:
-            fp.seek(pos, os.SEEK_SET)
-
-    def get_id3v2_tags(self, version=2, keep_unknown=False):
-        """Yields encoded ID3v2 tags"""
-        taglen, sizelen, flagslen, syncsafe, ids = ID3TAGS[version]
-        for tag, val in self.get_id3v2_items(ids, keep_unknown):
-            if len(tag) != taglen:
-                raise EncodeError('invalid tagsize: %d' % len(tag))
-            size = self.getbytes(len(val), syncsafe)[sizelen * -1:]
-            flags = '\x00' * flagslen
-            yield tag + size + flags + val
-
-    def get_id3v2_items(self, ids, keep_unknown=False):
-        """Yields encoded ID3v2 tag/value pairs"""
-        for tag, attr in ids.iteritems():
-            try:
-                val = self[attr]
-                if not val:
-                    raise EncodeError('empty value')
-                type = self.types[attr]
-                if type == BOOL:
-                    val = u'1'
-                elif type == DICT:
-                    for key, val in val.iteritems():
-                        lang, key = key
-                        if key == GAPLESS:
-                            if val:
-                                val = u'1'
-                            else:
-                                raise EncodeError('storing false')
-                        key2, val2 = self.mkstr(key), self.mkstr(val)
-                        if key2[0] == val2[0]:
-                            key, val = key2, val2
-                        elif key2[0] == '\x01':
-                            key, val = key2, self.mkstr(val, utf16=True)
-                        else:
-                            key, val = self.mkstr(key, utf16=True), val2
-                        yield tag, key[0] + lang + key[1:] + val[1:]
                     continue
-                elif type == GENRE:
-                    if val in GENRES:
-                        val = u'(%d)' % GENRES.index(val)
-                elif type == IDICT:
-                    for key, val in val.iteritems():
-                        key = self.mkstr(key[0])
-                        val, ptype = val
-                        if tag == 'APIC':
-                            fmt = 'image/%s\x00' % val.format.lower()
-                        elif val.format == 'JPEG':
+                if key is None:
+                    self[attr] = val
+                else:
+                    self.setdict(attr, key, val)
+            except DecodeErrors:
+                pass
+
+    def decode_mp3(self, pos=None, samplesize=None):
+        if pos is None:
+            pos = self.fp.tell()
+        if samplesize is None:
+            samplesize = SAMPLESIZE
+        try:
+            self.mp3start = None
+            self.fp.seek(pos, os.SEEK_SET)
+            sample = self.fp.read(samplesize)
+            size = self.uint32be.size
+            i = 0
+            while i < len(sample) - size + 1:
+                i = sample.find('\xff', i)
+                if i == -1:
+                    break
+                head = sample[i:i + size]
+                try:
+                    next = i + self.framelen(head)
+                    self.framelen(sample[next:next + size])
+                    self.mp3start = pos + i
+                    self.hasmp3 = True
+                    break
+                except DecodeErrors:
+                    i += 1
+            if self.mp3start is None:
+                raise DecodeError('no mp3 frames found')
+            self.hasmp3 = True
+        except DecodeErrors:
+            self.hasmp3 = False
+            self.mp3start = None
+            raise
+
+    def decode_id3v1(self):
+        try:
+            self.fp.seek(self.id3v1.size * -1, os.SEEK_END)
+            self.id3v1start = self.fp.tell()
+            tag = self.id3v1.unpack(self.fp.read(self.id3v1.size))
+            if tag[0] != 'TAG':
+                raise DecodeError('no id3v1 tag')
+            self.hasid3v1 = True
+            self.id3v1end = self.fp.tell()
+        except DecodeErrors:
+            self.hasid3v1 = False
+            self.id3v1start = None
+            self.id3v1end = None
+            raise
+        try:
+            self.name, self.artist, self.album, self.year = tag[1:5]
+        except ValidationError:
+            pass
+        if tag[5][28] == '\x00' and tag[5][29] != '\x00':
+            self.comment = tag[5][:28]
+            self.track = ord(tag[5][29])
+        else:
+            self.comment = tag[5]
+        self.genre = tag[6]
+
+    def save(self, version=None, unknown=False):
+        if self.changed or (self.hasid3v2 and version != self.id3v2version):
+            self.encode(self.fp, version=version, inplace=True, unknown=unknown)
+
+    def dump(self, file=None, version=None, unknown=False, padding=None):
+        if file is None:
+            file = StringIO()
+        with Open(file, 'wb') as fp:
+            self.encode(fp, version, False, unknown, padding)
+        if not fp.closed:
+            return fp
+
+    def dumps(self, version=None, unknown=False, padding=None):
+        return self.dump(None, version, unknown, padding).getvalue()
+
+    def encode(self, fp, version=None, inplace=False,
+               unknown=False, padding=None):
+        if version is None:
+            version = self.id3v2version
+        if version is None:
+            version = DEFAULT_ID3V2_VERSION
+        if version not in ID3V2OPTS:
+            raise EncodeError('unknown version: %r' % version)
+        if (unknown and self._unknown and
+            self.hasid3v2 and version != self.id3v2version):
+            raise EncodeError('cannot change id3v2 version and keep unknown')
+        if padding is None:
+            padding = DEFAULT_ID3V2_PADDING
+        opts = ID3V2OPTS[version]
+        frame, syncsafe, tags = opts['frame'], opts['syncsafe'], opts['tags']
+        haveid3v1 = haveid3v2 = False
+        for tag, attr in tags.iteritems():
+            if self[attr]:
+                haveid3v2 = True
+                if attr in ID3V1FIELDS:
+                    haveid3v1 = True
+                    break
+        id3v2pos = None
+        if inplace:
+            if haveid3v2:
+                if self.hasid3v2:
+                    id3v2pos = self.id3v2start
+                else:
+                    raise EncodeError("can't write new id3v2 tag")
+            elif self.hasid3v2:
+                id3v2pos = self.id3v2start
+        elif haveid3v2:
+            id3v2pos = fp.tell()
+        if id3v2pos is not None:
+            opts = ID3V2OPTS[version]
+            sizes = opts['frame'].unpack('\x00' * frame.size)
+            taglen, sizelen, flagslen = [len(i) for i in sizes]
+            flags = '\x00' * flagslen
+            fp.seek(id3v2pos, os.SEEK_SET)
+            fp.write('\x00' * 10)
+            if inplace:
+                bytes_left = tagsize = self.id3v2end - self.id3v2start
+                cache = []
+            else:
+                bytes_left = self.getint('\x7f\x7f\x7f\x7f', syncsafe=True)
+                tagsize = 0
+            bytes_left -= 10
+            for tag, val in self.id3v2items(opts['tags'], unknown):
+                if len(tag) != taglen:
+                    raise EncodeError('unexpected tag size')
+                size = self.getbytes(len(val), opts['syncsafe'])[sizelen * -1:]
+                tag = frame.pack(tag, size, flags) + val
+                size = len(tag)
+                if size > bytes_left:
+                    raise EncodeError('no room for id3v2 tag')
+                bytes_left -= size
+                if inplace:
+                    cache.append(tag)
+                else:
+                    fp.write(tag)
+                    tagsize += size
+            if inplace:
+                for tag in cache:
+                    fp.write(tag)
+                fp.write('\x00' * bytes_left)
+            else:
+                fp.write('\x00' * padding)
+                tagsize += padding
+            pos = fp.tell()
+            fp.seek(id3v2pos, os.SEEK_SET)
+            tagsize = self.getbytes(tagsize, syncsafe=True)
+            fp.write(self.id3v2.pack('ID3', version, 0, 0, tagsize))
+            fp.seek(pos, os.SEEK_SET)
+            if inplace:
+                self.id3v2version = version
+        if self.hasmp3 and not inplace:
+            for frame in self.mp3frames:
+                fp.write(frame)
+        id3v1pos = None
+        if inplace:
+            if self.hasid3v1:
+                id3v1pos = self.id3v1.size * -1
+            elif haveid3v1:
+                id3v1pos = 0
+        elif haveid3v1:
+            id3v1pos = 0
+        if id3v1pos is not None:
+            tag = ['TAG', self.pad(self.name), self.pad(self.artist),
+                   self.pad(self.album), self.pad(self.year, 4)]
+            if self.track and self.track[0] and self.track[0] < 256:
+                tag.append(self.pad(self.comment, 28) +
+                           '\x00' + chr(self.track[0]))
+            else:
+                tag.append(self.pad(self.comment))
+            if self.genre and self.genre in GENRES:
+                tag.append(GENRES.index(self.genre))
+            else:
+                tag.append(255)
+            fp.seek(id3v1pos, os.SEEK_END)
+            fp.write(self.id3v1.pack(*tag))
+            if inplace:
+                self.hasid3v1 = True
+                self.id3v1end = fp.tell()
+                self.id3v1start = self.id3v1end - self.id3v1.size
+
+    def id3v2items(self, tags, unknown=False):
+        for tag, attr in tags.iteritems():
+            val = self[attr]
+            if not val:
+                continue
+            type = self.types[attr]
+            if type == 'BOOL':
+                val = u'1'
+            elif type == 'DICT':
+                for key, val in val.iteritems():
+                    lang, key = key
+                    if key == GAPLESS:
+                        if not val:
+                            continue
+                        val = u'1'
+                    key2 = self.mkstr(key)
+                    val2 = self.mkstr(val, term=False)
+                    if key2[0] == val2[0]:
+                        key, val = key2, val2
+                    elif key2[0] == '\x01':
+                        key, val = key2, self.mkstr(val, utf16=True, term=False)
+                    else:
+                        key, val = self.mkstr(key, utf16=True), val2
+                    yield tag, key[0] + lang + key[1:] + val[1:]
+                continue
+            elif type == 'GENRE':
+                if val in GENRES:
+                    val = u'(%d)' % GENRES.index(val)
+            elif type == 'IDICT':
+                for key, val in val.iteritems():
+                    key = self.mkstr(key[0])
+                    val, ptype = val
+                    if tag == 'PIC':
+                        if val.format == 'JPEG':
                             fmt = 'JPG'
                         else:
                             fmt = val.format[:3]
-                        data = StringIO()
-                        val.save(data, val.format)
-                        yield tag, (key[0] + fmt + chr(ptype) +
-                                    key[1:] + data.getvalue())
-                    continue
-                elif type == INT32:
-                    if tag == 'RVA2':
-                        val = pack('>h', int(val / RVA2FACTOR))
-                        val = '\x00\x01%s\x00' % val
                     else:
-                        if val < 0:
-                            dir = '\x00'
-                            val *= -1
-                        else:
-                            dir = '\x03'
-                        val = list(pack('>L', val))
-                        while val and val[0] == '\x00':
-                            val.pop(0)
-                        val = ''.join(val)
-                        i = len(val)
-                        val = dir + chr(i * 8) + val * 2 + '\x00' * i * 2
-                elif type == UINT16:
-                    val = unicode(val)
-                elif type == UINT16X2:
-                    val = (u'%d/%d' % val).replace('/0', '')
-                if isinstance(val, unicode):
-                    val = self.mkstr(val)
-                yield tag, val
-            except SafeErrors:
-                pass
+                        fmt = 'image/%s\x00' % val.format.lower()
+                    data = StringIO()
+                    val.save(data, val.format)
+                    val = key[0] + fmt + chr(ptype) + key[1:] + data.getvalue()
+                    yield tag, val
+                continue
+            elif type == 'UINT16':
+                val = unicode(val)
+            elif type == 'UINT16X2':
+                val = u'%d/%d' % tuple(val)
+                val = val.replace('/0', '')
+            elif type == 'VOLUME':
+                if tag == 'RVA2':
+                    val = int(round(log(val / 100.0 + 1, 10) * 20 * 512, 0))
+                    val = '\x00\x01%s\x00' % self.int16be.pack(val)
+                else:
+                    if val < 0:
+                        val = val * -1
+                        dir = '\x00'
+                    else:
+                        dir = '\x03'
+                    val = self.uint16be.pack(int(val / 100 * 0x10000 - 1))
+                    val = dir + '\x10' + val * 2 + '\x00' * 4
+            if isinstance(val, unicode):
+                val = self.mkstr(val, term=False)
+            yield tag, val
+        if unknown and self._unknown:
+            for tag, vals in self._unknown.iteritems():
+                for val in vals:
+                    yield tag, val
 
-        if keep_unknown and self._unknown:
-            for tag, val in self._unknown:
-                yield tag, val
-
-    #####################################################################
-    ### various useful static methods specific to ID3 or MP3 decoding ###
-    #####################################################################
-
-    @staticmethod
-    def getint(val, syncsafe=False):
-        """Unpack bytes to integer, honoring the awful "syncsafe" algorithm"""
-        val = unpack('>L', '\x00' * (4 - len(val)) + val)[0]
+    @classmethod
+    def getint(cls, bytes, syncsafe=False):
+        val = '\x00' * (cls.uint32be.size - len(bytes)) + bytes
+        val = cls.uint32be.unpack(val)[0]
         if syncsafe:
             val = (((val & 0x0000007f) >> 0) | ((val & 0x00007f00) >> 1) |
                    ((val & 0x007f0000) >> 2) | ((val & 0x7f000000) >> 3))
         return val
 
-    @staticmethod
-    def getbytes(val, syncsafe=False):
-        """Pack integer"""
-        val = pack('>L', val)
+    @classmethod
+    def getbytes(cls, val, syncsafe=False):
+        bytes = cls.uint32be.pack(val)
         if syncsafe:
-            val = unpack('4B', val)
-            val = pack('4B',
-                       ((val[1] >> 5) & 0x07) | (val[0] << 3) & 0x7f,
-                       ((val[2] >> 6) & 0x03) | (val[1] << 2) & 0x7f,
-                       ((val[3] >> 7) & 0x01) | (val[2] << 1) & 0x7f,
-                       ((val[3] >> 0) & 0x7f))
-        return val
+            vals = cls.longbytes.unpack(bytes)
+            bytes = cls.longbytes.pack(
+                    ((vals[1] >> 5) & 0x07) | (vals[0] << 3) & 0x7f,
+                    ((vals[2] >> 6) & 0x03) | (vals[1] << 2) & 0x7f,
+                    ((vals[3] >> 7) & 0x01) | (vals[2] << 1) & 0x7f,
+                    ((vals[3] >> 0) & 0x7f))
+        return bytes
 
     @classmethod
     def getstr(cls, val):
-        """Decode ID3v2 text field"""
-        encoding, term = ENCODINGS[val[0]]
-        return cls.split(val[1:], term)[0].decode(encoding, 'ignore')
+        ebyte, val, encoding, term = cls.splitenc(val)
+        return cls.splitstr(val, term)[0].decode(encoding, 'ignore')
 
     @staticmethod
-    def mkstr(val, utf16=False):
-        """Encode ID3v2 text field, only use utf-16 if necessary or forced"""
+    def mkstr(val, utf16=False, term=True):
         if val is None:
             val = u''
         if not utf16:
             try:
-                return '\x00%s\x00' % val.encode('latin-1')
+                val = '\x00%s' % val.encode('latin-1')
+                if term:
+                    val += '\x00'
+                return val
             except UnicodeEncodeError:
                 pass
-        return '\x01\xff\xfe%s\x00\x00' % val.encode('utf-16-le')
+        val = '\x01\xff\xfe%s' % val.encode('utf-16-le')
+        if term:
+            val += '\x00\x00'
+        return val
 
     @staticmethod
-    def split(val, term='\x00', offset=0):
-        """Split string without breaking utf-16 encoding"""
+    def splitenc(val):
+        try:
+            ebyte = val[0]
+            encoding, term = ENCODINGS[ebyte]
+            return ebyte, val[1:], encoding, term
+        except (KeyError, IndexError):
+            return '', val, 'ascii', '\x00'
+
+    @staticmethod
+    def splitstr(val, term='\x00', offset=0):
         end = len(val)
         tsize = len(term)
         i = 0
@@ -1534,366 +1328,247 @@ class MP3(BaseDecoder):
         i += offset * tsize
         return val[:i], val[i:]
 
+    @classmethod
+    def framelen(cls, head):
+        head = cls.uint32be.unpack(head)[0]
+        if head & 0xffe00000 != 0xffe00000:
+            raise DecodeError('no frame sync')
+        version = (head >> 0x13) & 0x03
+        layer = (head >> 0x11) & 0x03
+        version_idx = None
+        if version == 3:
+            if layer == 3:
+                version_idx = 0
+            elif layer == 2:
+                version_idx = 1
+            elif layer == 1:
+                version_idx = 2
+        elif version in (0, 2):
+            if layer == 3:
+                version_idx = 3
+            elif layer in (1, 2):
+                version_idx = 4
+        if version_idx is None:
+            raise DecodeError('invalid version/layer')
+        bitrate = BITRATES[version_idx][(head >> 0x0c) & 0x0f] * 1000.0
+        if not bitrate:
+            raise DecodeError('invalid bitrate')
+        srate = SRATES[version][(head >> 0x0a) & 0x03]
+        if not srate:
+            raise DecodeError('invalid sample rate')
+        if layer == 3:
+            return int((12 * bitrate / srate + ((head >> 0x09) & 0x01)) * 4)
+        else:
+            return int(144 * bitrate / srate + ((head >> 0x09) & 0x01))
+
     @staticmethod
     def pad(val, size=30):
-        """Pad ID3v1 text field"""
         if val is None:
             val = ''
         elif isinstance(val, unicode):
-            val = val.encode('ascii', 'ignore')
-        elif not isinstance(val, unicode):
+            val = val.encode('ascii', 'ignore').strip()
+        else:
             val = str(val)
-        val = val.strip()[:size]
+        val = val[:size]
         return val + '\x00' * (size - len(val))
-
-    @classmethod
-    def seekmp3(cls, fp, samplesize=None):
-        """Seek to first valid MP3 frame"""
-        if samplesize is None:
-            samplesize = MAXJUNK
-        pos = fp.tell()
-        try:
-            sample = fp.read(samplesize)
-            i = 0
-            while i < len(sample) - 3:
-                i = sample.find('\xff', i)  # skip ahead to possible syncword
-                if i == -1:
-                    raise DecodeError('no syncword found')
-                try:
-                    # see note in head_check() for what's going on here
-                    next = i + cls.head_check(sample[i:i + 4])
-                    cls.head_check(sample[next:next + 4])
-                    pos += i
-                    break
-                except SafeErrors:
-                    pass
-                i += 1
-        finally:
-            fp.seek(pos, os.SEEK_SET)
-
-    @staticmethod
-    def head_check(head):
-        """Return frame length if 4-byte value is an MP3 header"""
-
-        # a note about this function:  I found the mpg123 head_check to
-        # be insufficient and easily confused about what a valid MP3
-        # frame is.  this is a bit more rigourous in that it calculates
-        # the expected frame size and looks ahead to see if a valid mp3
-        # frame follows immediately after, which you'd expect if it's a
-        # valid MP3 file.  However, since this is not implementing an
-        # MP3 decoder in its entirety, it's possible to get this wrong
-        # for incorrectly encoded MP3s, where a robust player can
-        # probably deal with it transparently.  so it goes.  I tested
-        # this on a pretty large library and it only choked on a handful
-        # of files, all of which were the uncommon version 2/layer 3
-        # format.  I ran these through mplayer with debug level high,
-        # and although it was able to play them, it encountered errors
-        # every frame.  My honest recommendation is to re-encode these
-        # in LAME with -V0 rather than making this function more robust,
-        # as it's already pretty complicated.  Decoding broken MP3's is
-        # way outside the scope of this library.
-
-        head = unpack('>L', head)[0]
-        if head & 0xffe00000 != 0xffe00000:
-            raise DecodeError('no syncword')
-        version = (head >> 19) & 3
-        layer = (head >> 17) & 3
-        if version == 3 and layer == 3:
-            bitrate_index = 0
-        elif version == 3 and layer == 2:
-            bitrate_index = 1
-        elif version == 3 and layer == 1:
-            bitrate_index = 2
-        elif version in (0, 2) and layer == 3:
-            bitrate_index = 3
-        elif version in (0, 2) and layer in (2, 1):
-            bitrate_index = 4
-        else:
-            raise DecodeError('invalid version/layer')
-        bitrate = BITRATES[bitrate_index][(head >> 12) & 15] * 1000.0
-        if not bitrate:
-            raise DecodeError('invalid bitrate')
-        srate = SRATES[version][(head >> 10) & 3]
-        if not srate:
-            raise DecodeError('invalid sample rate')
-        padding = (head >> 9) & 1
-        if layer == 3:
-            return int((12 * bitrate / srate + padding) * 4)
-        else:
-            return int(144 * bitrate / srate + padding)
 
 
 class IFF(MP3):
 
-    """Decodes metadata on RIFF/AIFF files"""
-
-    # The reason this subclasses MP3 is because IFF can
-    # act as a container for MP3 data or also attach ID3V2
-    # tags to arbitrary media such as Microsoft WAV.  If it
-    # finds an MPEG.data chunk that contains actual MP3 data,
-    # calling save() will write an actual MP3 file rather than
-    # a RIFF/AIFF file.
-    #
-    # Furthermore note that this can decode metadata on AVI
-    # files which are just RIFF's, although they typically
-    # don't have any useful metadata outside of what encoder was used,
-    # like VirtualDub, transcode, etc.
-
     format = 'iff'
 
-    def decode(self, fp, offset=0):
-        """Decodes metadata on open RIFF/AIFF file"""
-        try:
-            self.decode_id3v1(fp)
-        except SafeErrors:
-            pass
-        self.decode_iff(fp, offset, fp.tell())
+    aiff = Struct('>4sL')
+    riff = Struct('<4sL')
 
-    def decode_iff(self, fp, pos, end, fmt=None):
-        """Walk IFF chunks and decode metadata"""
+    def decode(self, pos=None, end=None, fmt=None):
+        if pos is None:
+            pos = 0
+        if end is None:
+            self.fp.seek(0, os.SEEK_END)
+            end = self.fp.tell()
+        try:
+            self.decode_id3v1()
+        except DecodeErrors:
+            pass
         while pos < end:
-            fp.seek(pos, os.SEEK_SET)
-            id = fp.read(4)
+            self.fp.seek(pos, os.SEEK_SET)
             if fmt is None:
-                # the only difference between AIFF and RIFF is the
-                # endianess of the size field and the first typeID.
-                if id == 'RIFF':
-                    fmt = '<L'
-                elif id in ('FORM', 'LIST', 'CAT '):
-                    fmt = '>L'
+                id = self.fp.read(4)
+                if id in ('FORM', 'CAT ', 'LIST'):
+                    fmt = self.aiff
+                elif id == 'RIFF':
+                    fmt = self.riff
                 else:
-                    raise DecodeError('unknown format')
-            size = unpack(fmt, fp.read(4))[0]
-            pos += 8
-            try:
-                if id in ('RIFF', 'FORM', 'LIST', 'CAT '):
-                    self.decode_iff(fp, pos + 4, pos + size, fmt)
-                elif id in IFFIDS:
-                    val = list(fp.read(size).decode('utf-8', 'ignore'))
-                    while val and val[-1] == '\x00':
-                        val.pop()
-                    self[IFFIDS[id]] = ''.join(val)
-                elif id == 'ID3 ':
-                    self.decode_id3v2(fp, offset=pos)
-                elif id == 'data':
-                    self.seekmp3(fp)
-                    self.mp3start = fp.tell()
-                    self.mp3size = pos + size - self.mp3start
-                    self.has_mp3data = True
-            except SafeErrors:
-                pass
+                    raise DecodeError('not an iff file')
+                self.fp.seek(pos, os.SEEK_SET)
+            id, size = fmt.unpack(self.fp.read(fmt.size))
+            pos += fmt.size
+            if id in ('FORM', 'CAT ', 'LIST', 'RIFF'):
+                self.decode(pos + 4, pos + size, fmt)
+            elif id in IFFIDS:
+                val = self.unpad(self.fp.read(size).decode('utf-8', 'ignore'))
+                try:
+                    self[IFFIDS[id]] = val
+                except ValidationError:
+                    pass
+            elif id == 'data':
+                try:
+                    self.decode_mp3()
+                except DecodeErrors:
+                    pass
+            elif id == 'ID3 ':
+                try:
+                    self.decode_id3v2(self.fp.tell())
+                except DecodeErrors:
+                    pass
             pos += size + size % 2
 
 
-class M4A(BaseDecoder):
-
-    """Decodes atom metadata on M4A/MP4 files"""
-
-    # This decoder can walk any mpeg4 file but only
-    # knows about the atoms relevant to apple's AAC or lossless format.
-    # This could be extended by updating the ATOMS if anyone is so
-    # inclined..
-
-    # One thing it doesn't do is parse the '----' atom, which behaves
-    # like a dictionary for storing arbitrary fields.  I'm unclear as to
-    # why apple did this when they are in control of the
-    # moov.udta.meta.ilst specification.   taglib used to support this
-    # field, which made the decoder twice as complicated, so I tossed it
-    # out.  I couldn't find any documentation on what data stored there
-    # is, but it looked like information about the encoding parameters
-    # used for the actual audio data.  Since the codec in use is
-    # entirely closed by apple, I see no use for this metadata.
+class M4A(Decoder):
 
     format = 'm4a'
 
-    def decode(self, fp, offset=0):
-        """Decodes atom metadata on open M4A/MP4 file"""
-        self.decode_atoms(fp, offset, next='ftyp')
+    head = Struct('>L4s')
+    uint16x2 = Struct('>2H')
 
-    def decode_atoms(self, fp, pos=None, end=None, base=None, next=None):
-        """Walk atom structure and decode metadata"""
+    def decode(self, pos=None, end=None, base=None, ftyp=False):
         if pos is None:
-            pos = fp.tell()
+            pos = self.fp.tell()
         if end is None:
-            fp.seek(0, os.SEEK_END)
-            end = fp.tell()
+            self.fp.seek(0, os.SEEK_END)
+            end = self.fp.tell()
         if base is None:
             base = []
         while pos < end:
-            fp.seek(pos, os.SEEK_SET)
-            size, name = unpack('>L4s', fp.read(8))
+            self.fp.seek(pos, os.SEEK_SET)
+            size, name = self.head.unpack(self.fp.read(self.head.size))
             path = base + [name]
             tag = '.'.join(path)
-            if next:
-                if tag != next:
-                    raise DecodeError('unexpected atom: %s' % tag)
-                next = None
-            try:
-                if tag not in ATOMS:
-                    raise DecodeError('unsupported atom: %s' % tag)
-                atom, attr = ATOMS[tag]
-                # for some reason, some "container" atoms have an extra
-                # 4 NULL bytes which should be accounted for when
-                # seeking.  I label these atoms CONTAINER2.  I'm not
-                # sure what purpose these serve, perhaps they are
-                # 64bit atom sizes?  I'm pretty sure if you have a 4G
-                # audio file, you have more problems to worry about than
-                # reading the metadata, so I just ignore these bytes.
-                if atom == ATOM_CONTAINER1:
-                    self.decode_atoms(fp, pos + 8, pos + size, path)
-                elif atom == ATOM_CONTAINER2:
-                    self.decode_atoms(fp, pos + 12, pos + size, path)
-                elif atom == ATOM_DATA:
-                    type = self.types[attr]
-                    fp.seek(pos + 24, os.SEEK_SET)
-                    val = fp.read(size - 24)
-                    if type == GENRE:
-                        if len(val) == 2 and val[0] in '\x00\x01':
-                            val = unpack('>H', val)[0] - 1
-                    elif type == IMAGE:
-                        val = StringIO(val)
-                    elif type == TEXT:
+            if not ftyp:
+                if tag != 'ftyp':
+                    raise DecodeError('not an mpeg4 file')
+                ftyp = True
+            atom, attr = ATOMS.get(tag, (None, None))
+            if atom == 'CONTAINER1':
+                self.decode(pos + 8, pos + size, path, ftyp)
+            elif atom == 'CONTAINER2':
+                self.decode(pos + 12, pos + size, path, ftyp)
+            elif atom == 'DATA':
+                self.fp.seek(pos + 24)
+                val = self.fp.read(size - 24)
+                type = self.types[attr]
+                if type in ('GENRE', 'TEXT'):
+                    if name == 'gnre':
+                        val = GENRES[self.uint16be.unpack(val)[0] - 1]
+                    else:
                         val = val.decode('utf-8')
-                    elif type == UINT16:
-                        if name == 'tmpo':
-                            val = unpack('>H', val)[0]
-                    elif type == UINT16X2:
-                        val = unpack('>2H', val[2:6])
-                    elif type == UINT32:
-                        val = unpack('>L', val)[0]
+                elif type == 'IMAGE':
+                    val = StringIO(val)
+                elif type == 'UINT16':
+                    if name == 'tmpo':
+                        val = self.uint16be.unpack(val)[0]
+                elif type == 'UINT16X2':
+                    val = self.uint16x2.unpack(val[2:6])
+                elif type == 'UINT32':
+                    val = self.uint32be.unpack(val)[0]
+                try:
                     self[attr] = val
-            except SafeErrors:
-                pass
+                except ValidationError:
+                    pass
             if not size:
                 break
             pos += size
 
 
-class VorbisComment(BaseDecoder):
+class Vorbis(Decoder):
 
-    """Provides decoder for VorbisComment tag"""
+    format = 'vorbis'
 
-    # this decoder isn't meant to be used standalone, but to be
-    # subclassed by formats that have the Vorbis Comment metadata
-    # embedded.  Both FLAC and OGG do this.
+    uint32le = Struct('<L')
 
-    def decode_vorbis(self, fp, size):
-        """Decode VorbisComment"""
-        read = self.getbufread(fp, size)
-        getint = lambda: unpack('<L', read(4))[0]
-        getstr = lambda: read(getint()).decode('utf-8')
-        self.encoder = getstr()
-        for i in xrange(getint()):
-            key, val = getstr().split('=', 1)
-            attr = VORBISTAGS.get(key.lower())
-            if attr:
-                try:
-                    self[attr] = val
-                except ValidationError:
-                    pass
+    def decode(self):
+        self.encoder = self.getstr()
+        for i in xrange(self.getint()):
+            key, val = self.getstr().split('=', 1)
+            try:
+                attr = VORBISTAGS[key.lower()]
+            except KeyError:
+                continue
+            if self.types[attr] == 'GENRE':
+                if val.isdigit():
+                    val = int(val)
+                else:
+                    try:
+                        val = int(self.genre_re.search(val).group(1))
+                    except AttributeError:
+                        pass
+            try:
+                self[attr] = val
+            except ValidationError:
+                pass
+
+    def getint(self):
+        return self.uint32le.unpack(self.fp.read(self.uint32le.size))[0]
+
+    def getstr(self):
+        return self.fp.read(self.getint()).decode('utf-8', 'ignore')
 
 
-class FLAC(VorbisComment):
-
-    """Decodes VorbisComment on FLAC files"""
-
-    # Not much to say here.  FLAC is VERY simple to parse.  YAY!
+class FLAC(Vorbis):
 
     format = 'flac'
 
-    def decode(self, fp, offset=0):
-        """Decodes VorbisComment on open FLAC file"""
-        fp.seek(offset, os.SEEK_SET)
-        if fp.read(4) != 'fLaC':
-            raise DecodeError('no flac header found')
-        pos = fp.tell()
-        fp.seek(0, os.SEEK_END)
-        end = fp.tell()
+    head = Struct('B3s')
+
+    def decode(self):
+        self.fp.seek(0, os.SEEK_SET)
+        if self.fp.read(4) != 'fLaC':
+            raise DecodeError('not a flac file')
+        pos = 4
+        self.fp.seek(0, os.SEEK_END)
+        end = self.fp.tell()
         while pos < end:
-            fp.seek(pos, os.SEEK_SET)
-            head, size = unpack('B3s', fp.read(4))
-            size = unpack('>L', '\x00' + size)[0]
+            self.fp.seek(pos, os.SEEK_SET)
+            head, size = self.head.unpack(self.fp.read(self.head.size))
+            size = self.uint32be.unpack('\x00' + size)[0]
             if head & 127 == 4:
-                self.decode_vorbis(fp, size)
+                super(FLAC, self).decode()
             if head & 128:
                 break
-            pos = pos + 4 + size
+            pos += size + self.head.size
 
 
-class OGG(VorbisComment):
-
-    """Decodes VorbisComment on OGG files"""
-
-    # Like FLAC, OGG is very straightforward to decode.  The whole
-    # segments/packets construct is a little awkward compared to FLAC,
-    # but easy enough to implement sufficiently to get to the metadata
-    # page.  I'm not sure it's implemented sufficiently for anything
-    # more than that though, so don't rely on this function if you are
-    # writing code meant to parse the OGG files themselves.  I didn't
-    # want to spend a lot of time on this since OGG is a relatively
-    # obscure format, just get to the metadata reliably.
+class OGG(Vorbis):
 
     format = 'ogg'
 
-    def decode(self, fp, offset=0):
-        """Decodes VorbisComment on open OGG file"""
-        pos = offset
-        fp.seek(0, os.SEEK_END)
-        end = fp.tell()
+    page = Struct('>4s2BQ3LB')
+
+    def decode(self):
+        self.fp.seek(0, os.SEEK_END)
+        end = self.fp.tell()
+        pos = 0
         while pos < end:
-            fp.seek(pos, os.SEEK_SET)
-            head = unpack('>4s2BQ3LB', fp.read(27))
-            if head[0] != 'OggS' or head[1]:
-                raise DecodeError('invalid ogg page')
-            last = head[7] - 1
-            packets = [0]
-            for i, segment in enumerate(fp.read(head[7])):
-                segment = ord(segment)
-                packets[-1] += segment
-                if segment < 255 and i != last:
-                    packets.append(0)
-            for packet in packets:
-                if fp.read(7) == '\x03vorbis':
-                    self.decode_vorbis(fp, packet - 8)
-            pos = pos + 27 + head[7] + sum(packets)
-            if head[2] & 4:
-                break
+            self.fp.seek(pos, os.SEEK_SET)
+            page = self.page.unpack(self.fp.read(self.page.size))
+            if page[0] != 'OggS':
+                raise DecodeError('not an ogg page')
+            size = sum(ord(i) for i in self.fp.read(page[7]))
+            if self.fp.read(7) == '\x03vorbis':
+                super(OGG, self).decode()
+            pos += size + page[7] + self.page.size
+
+
+DECODERS = FLAC, OGG, M4A, IFF, MP3
 
 
 def tagopen(file, readonly=True):
-    """
-    Open file and decode metadata
-
-    The default is to open read-only, which prevents changing attributes
-    and does not provide a save() method.  Setting this to False will
-    return the metadata with full encoder/decoder methods and allow you
-    to update the metadata before re-encoding.
-    """
-    for decoder in DECODERS:
+    for cls in DECODERS:
         try:
-            obj = decoder(file)
-            if readonly:
-                return Metadata(obj)
-            return obj
+            tag = cls(file)
         except InvalidMedia:
-            pass
+            continue
+        if readonly or not cls.editable:
+            tag = Metadata(tag)
+        return tag
     raise InvalidMedia('no suitable decoder found')
-
-
-# a list of valid decoders
-DECODERS = FLAC, M4A, OGG, IFF, MP3
-
-# these are all the errors one might encounter while decoding
-# that should not result in a fatal error.  in a perfect world, every
-# tag would be perfect, but the reality is that many are
-# corrupted/implemented incorrectly.  Catching these exceptions means
-# the metadata it was able to read before blowing up doesn't get lost.
-# Like how browsers parse HTML, it's the "better than nothing"
-# principle.  Put another way, there's no use being a stickler for
-# standards when the standards are so shitty no one implements them
-# correctly or consistently.  If a decoder fails miserably in every way,
-# an InvalidMedia exception will be raised, which is cleaner to catch in
-# the caller.
-
-SafeErrors = (IOError, OSError, EOFError, StructError,
-              ValidationError, DecodeError, EncodeError)
