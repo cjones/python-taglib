@@ -153,7 +153,7 @@ def test(file, version=None):
         return ['unexpected decode error: %s' % error]
     errors = []
     # actual mp3 files can be inside a RIFF container, so don't complain
-    if not isinstance(src, MP3):
+    if not isinstance(src, MP3) or not src.hasmp3:
         return errors
     try:
         dst = src.dump(version=version)
