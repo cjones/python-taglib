@@ -142,7 +142,7 @@ def find(dir, skip_svn=True):
     log.info('finished scanning')
 
 
-def test(file, version=None):
+def test(file, version=None, fakemp3=False):
     """Test decode/save/decode of file and return errors if any"""
     ext = os.path.splitext(file)[1].lower()
     try:
@@ -156,7 +156,7 @@ def test(file, version=None):
     if not isinstance(src, MP3) or not src.hasmp3:
         return errors
     try:
-        dst = src.dump(version=version)
+        dst = src.dump(version=version, fakemp3=fakemp3)
     except Exception, error:
         return errors + ['could not save: %s' % error]
     try:
@@ -178,6 +178,8 @@ def main(args=None):
                         help='log messages to <file>')
     optparse.add_option('-V', dest='version', metavar='<2|3|4>', type='int',
                         help='force id3 version (default: same as source)')
+    optparse.add_option('-s', dest='fakemp3', default=False,
+                        action='store_true', help="skip mp3 copy for speed")
     opts, args = optparse.parse_args(args)
     if len(args) != 1:
         optparse.print_help()
@@ -194,7 +196,7 @@ def main(args=None):
         with Meter('TestLibrary', find(library)) as meter:
             for file in meter:
                 files_tested += 1
-                errors = test(file, version=opts.version)
+                errors = test(file, version=opts.version, fakemp3=opts.fakemp3)
                 nerr = len(errors)
                 if nerr:
                     files_broken += 1
