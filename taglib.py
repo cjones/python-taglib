@@ -826,6 +826,8 @@ class MP3(Decoder):
     genre_re = re.compile(r'^\((\d+)\)$')
     track_re = re.compile(r'^(.+)\x00 ([^\x00])$')
 
+    fakemp3 = '\xff\xf2\x14\x00' * 7
+
     def __init__(self, *args, **kwargs):
         self.hasid3v1 = False
         self.id3v1start = None
@@ -1110,14 +1112,18 @@ class MP3(Decoder):
             raise
 
     def encode(self, fp, inplace=False, version=None, unknown=False,
-               padding=None, doid3v1=True, doid3v2=True, domp3=True):
+               padding=None, doid3v1=True, doid3v2=True, domp3=True,
+               fakemp3=False):
         if inplace and not self.hasid3v2:
             doid3v2 = False
         if doid3v2:
             self.encode_id3v2(fp, inplace, version, unknown, padding, doid3v2)
-        if domp3 and self.hasmp3 and not inplace:
-            for frame in self.mp3frames:
-                fp.write(frame)
+        if domp3 and not inplace:
+            if fakemp3:
+                fp.write(self.fakemp3)
+            elif self.hasmp3:
+                for frame in self.mp3frames:
+                    fp.write(frame)
         if doid3v1:
             self.encode_id3v1(fp, inplace)
 
