@@ -60,7 +60,7 @@ try:
 except ImportError:
     PIL = False
 
-__version__ = '3.0'
+__version__ = '3.1'
 __author__ = 'Chris Jones <cjones@gruntle.org>'
 __all__ = ['tagopen', 'InvalidMedia', 'ValidationError']
 
@@ -1510,12 +1510,26 @@ class Vorbis(Decoder):
     def getstr(self):
         return self.fp.read(self.getint()).decode('utf-8', 'ignore')
 
+    def encode(self, fp, inplace=False):
+        setstr = lambda val: fp.write(self.uint32le.pack(len(val)) + val)
+        setstr((self.encoder or u'taglib %s' % __version__).encode('utf-8'))
+        tags = ['%s=%s' % (attr.upper(), self.getdisplay(attr, 'utf-8'))
+                for attr in self if attr not in ('encoder', 'image')]
+        fp.write(self.uint32le.pack(len(tags)))
+        for tag in tags:
+            setstr(tag)
+
 
 class FLAC(Vorbis):
 
     format = 'flac'
+    editable = True
 
     head = Struct('B 3s')
+
+    def __init__(self, *args, **kwargs):
+        self.blocks = None
+        super(FLAC, self).__init__(*args, **kwargs)
 
     def decode(self):
         self.fp.seek(0, os.SEEK_SET)
@@ -1524,16 +1538,39 @@ class FLAC(Vorbis):
         pos = 4
         self.fp.seek(0, os.SEEK_END)
         end = self.fp.tell()
+        self.blocks = []
         while pos < end:
             self.fp.seek(pos, os.SEEK_SET)
             head, size = self.unpack(self.head)
             pos += self.head.size
             size = self.uint32be.unpack('\x00' + size)[0]
+            self.blocks.append((pos, size, head))
             if head & 127 == 4:
                 super(FLAC, self).decode()
             if head & 128:
                 break
             pos += size
+
+    def encode(self, fp, inplace=False):
+        fp.write('fLaC')
+        for pos, size, head in self.blocks:
+            if head & 127 == 4:
+                tag = StringIO()
+                super(FLAC, self).encode(tag)
+                data = tag.getvalue()
+                newsize = len(data)
+            else:
+                self.fp.seek(pos)
+                data = self.fp.read(size)
+                newsize = size
+            fp.write(self.head.pack(head, self.uint32be.pack(newsize)[1:]))
+            fp.write(data)
+        self.fp.seek(pos + size)
+        fp.write(self.fp.read())  # XXX flac files can get pretty big..
+
+    @staticmethod
+    def save(*args, **kwargs):
+        raise NotImplementedError
 
 
 class OGG(Vorbis):
