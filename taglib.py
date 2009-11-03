@@ -66,7 +66,7 @@ __author__ = 'Chris Jones <cjones@gruntle.org>'
 __all__ = ['tagopen', 'InvalidMedia', 'ValidationError']
 
 DEFAULT_ID3V2_VERSION = 2
-DEFAULT_ID3V2_PADDING = 128
+DEFAULT_PADDING = 128
 MP3_SAMPLESIZE = 5762
 ANYITEM = -1
 GAPLESS = u'iTunPGAP'
@@ -1208,7 +1208,7 @@ class MP3(Decoder):
             if not size:
                 return
             if padding is None:
-                padding = DEFAULT_ID3V2_PADDING
+                padding = DEFAULT_PADDING
         size += padding
         fp.write(self.id3v2head.pack('ID3', version, 0, 0,
                                      self.getbytes(size, syncsafe=True)))
@@ -1687,7 +1687,9 @@ class OGG(Vorbis):
                 pos += size
             self.pages.append((start, head, packets))
 
-    def encode(self, fp, inplace=False):
+    def encode(self, fp, inplace=False, padding=None):
+        if padding is None:
+            padding = DEFAULT_PADDING
         for pos, head, packets in self.pages:
             self.fp.seek(pos, os.SEEK_SET)
             page = []
@@ -1696,7 +1698,9 @@ class OGG(Vorbis):
                 if comment:
                     val = StringIO()
                     super(OGG, self).encode(val)
-                    data = val.getvalue() + '\x01'
+                    data = ('\x03vorbis' + val.getvalue() +
+                            '\x01' + '\x00' * padding)
+                    self.fp.seek(size, os.SEEK_CUR)
                 else:
                     data = self.fp.read(size)
                 page.append(data)
@@ -1736,16 +1740,3 @@ def tagopen(file, readonly=False):
 
 Errors = TaglibError, StructError, IOError, OSError, EOFError
 Decoders = FLAC, M4A, OGG, IFF, MP3
-
-
-def main():
-    # XXX OGG encoder is.. off somehow
-    return 0
-
-if __name__ == '__main__':
-    try:
-        import psyco
-        psyco.full()
-    except ImportError:
-        pass
-    sys.exit(main())
