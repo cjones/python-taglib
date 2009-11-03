@@ -1511,7 +1511,13 @@ class M4A(Decoder):
 
 class Vorbis(Decoder):
 
+    def __init__(self, *args, **kwargs):
+        self.tagstart = None
+        self.tagend = None
+        super(Vorbis, self).__init__(*args, **kwargs)
+
     def decode(self):
+        self.tagstart = self.fp.tell()
         self.encoder = self.getstr()
         for i in xrange(self.getint()):
             tag, val = self.getstr().split('=', 1)
@@ -1523,6 +1529,7 @@ class Vorbis(Decoder):
                 self[attr] = val
             except ValidationError:
                 pass
+        self.tagend = self.fp.tell()
 
     def getint(self):
         return self.unpack(self.uint32le)
@@ -1612,11 +1619,12 @@ class CRC(object):
                 r = self.reflect(r, self.bits)
             self.table.append(r & ((((1 << (self.bits - 1)) - 1) << 1) | 1))
 
-    def checksum(self, data):
+    def checksum(self, *args):
         clear = 2 ** self.bits - 1
         r = self.initial
-        for byte in data:
-            r = ((r << 8) ^ self.table[(r >> 24) ^ ord(byte)]) & clear
+        for data in args:
+            for byte in data:
+                r = ((r << 8) ^ self.table[(r >> 24) ^ ord(byte)]) & clear
         return r
 
     @classmethod
@@ -1624,7 +1632,7 @@ class CRC(object):
         t = v
         for i in xrange(b):
             if t & 1:
-                v |=  cls.bitmask((b - 1) - i)
+                v |= cls.bitmask((b - 1) - i)
             else:
                 v &= ~cls.bitmask((b - 1) - i)
             t >>= 1
@@ -1642,9 +1650,10 @@ class OGG(Vorbis):
 
     head = Struct('< 4s 2B Q 3L B')
 
+    crc = CRC()
+
     def __init__(self, *args, **kwargs):
         self.pages = []
-        self.crc = CRC()
         super(OGG, self).__init__(*args, **kwargs)
 
     def decode(self):
@@ -1658,31 +1667,53 @@ class OGG(Vorbis):
             if head[0] != 'OggS':
                 raise DecodeError('not an ogg page')
             table = self.fp.read(head[7])
-            size = sum(ord(i) for i in table)
-            if self.fp.read(7) == '\x03vorbis':
-                super(OGG, self).decode()
-                comment = True
-            else:
-                comment = False
-            self.pages.append((pos, size, comment, head, table))
-            pos += self.head.size + head[7] + size
+            pos += self.head.size + head[7]
+            start = pos
+            packets = [0]
+            last = len(table) - 1
+            for i, segment in enumerate(table):
+                segment = ord(segment)
+                packets[-1] += segment
+                if segment < 255 and i != last:
+                    packets.append(0)
+            for i, size in enumerate(packets):
+                self.fp.seek(pos, os.SEEK_SET)
+                if self.fp.read(7) == '\x03vorbis':
+                    super(OGG, self).decode()
+                    comment = True
+                else:
+                    comment = False
+                packets[i] = size, comment
+                pos += size
+            self.pages.append((start, head, packets))
 
     def encode(self, fp, inplace=False):
-        for pos, size, comment, head, table in self.pages:
-            self.fp.seek(pos + self.head.size + head[7], os.SEEK_SET)
-            data = self.fp.read(size)
-
-            tmp = list(head)
-            tmp[6] = 0
-            tmp = self.head.pack(*tmp) + table + data
-            checksum = self.crc.checksum(tmp)
-
-            #print 'chksum', checksum == head[6]
-
-            # fp.write(self.head.pack(*head))
-            # fp.write(table)
-            # pos = pos + self.head.size + head[7]
-            # self.copyfile(self.fp, fp, pos, pos + size)
+        for pos, head, packets in self.pages:
+            self.fp.seek(pos, os.SEEK_SET)
+            page = []
+            for packet in packets:
+                size, comment = packet
+                if comment:
+                    val = StringIO()
+                    super(OGG, self).encode(val)
+                    data = val.getvalue() + '\x01'
+                else:
+                    data = self.fp.read(size)
+                page.append(data)
+            table = []
+            for size in (len(packet) for packet in page):
+                i, r = divmod(size, 255)
+                table.append('\xff' * i)
+                table.append(chr(r))
+            table = ''.join(table)
+            head = list(head)
+            head[6] = 0
+            head[7] = len(table)
+            head[6] = self.crc.checksum(self.head.pack(*head), table, *page)
+            fp.write(self.head.pack(*head))
+            fp.write(table)
+            for data in page:
+                fp.write(data)
 
     @staticmethod
     def save(*args, **kwargs):
@@ -1708,8 +1739,7 @@ Decoders = FLAC, M4A, OGG, IFF, MP3
 
 
 def main():
-    tag = tagopen('sample.ogg')
-    tag.dumps()
+    # XXX OGG encoder is.. off somehow
     return 0
 
 if __name__ == '__main__':
