@@ -34,6 +34,7 @@
 # Vorbis: http://www.xiph.org/vorbis/doc/v-comment.html
 # FLAC:   http://flac.sourceforge.net/format.html#stream
 # OGG:    http://en.wikipedia.org/wiki/Ogg#File_format
+# CRC:    http://www.ross.net/crc/download/crc_v3.txt
 
 from __future__ import with_statement
 import sys
@@ -70,6 +71,7 @@ MP3_SAMPLESIZE = 5762
 ANYITEM = -1
 GAPLESS = u'iTunPGAP'
 ENCODING = sys.getfilesystemencoding()
+BLOCKSIZE = 4096
 
 (DICT, IDICT, TEXT, UINT16, BOOL, UINT16X2,
  GENRE, IMAGE, UINT32, VOLUME) = xrange(10)
@@ -798,6 +800,24 @@ class Decoder(Metadata):
         if not val and type not in (DICT, IDICT):
             val = None
         return val
+
+    @staticmethod
+    def copyfile(src, dst, pos=None, end=None, blocksize=None):
+        if pos is None:
+            pos = src.tell()
+        if end is None:
+            src.seek(0, os.SEEK_END)
+            end = src.tell()
+        if blocksize is None:
+            blocksize = BLOCKSIZE
+        left = end - pos
+        src.seek(pos, os.SEEK_SET)
+        while left:
+            data = src.read(left if blocksize > left else blocksize)
+            if not data:
+                break
+            dst.write(data)
+            left -= len(data)
 
 
 class MP3Frame(Container):
@@ -1528,7 +1548,7 @@ class FLAC(Vorbis):
     head = Struct('B 3s')
 
     def __init__(self, *args, **kwargs):
-        self.blocks = None
+        self.blocks = []
         super(FLAC, self).__init__(*args, **kwargs)
 
     def decode(self):
@@ -1560,38 +1580,113 @@ class FLAC(Vorbis):
                 data = tag.getvalue()
                 newsize = len(data)
             else:
-                self.fp.seek(pos)
+                self.fp.seek(pos, os.SEEK_SET)
                 data = self.fp.read(size)
                 newsize = size
             fp.write(self.head.pack(head, self.uint32be.pack(newsize)[1:]))
             fp.write(data)
-        self.fp.seek(pos + size)
-        fp.write(self.fp.read())  # XXX flac files can get pretty big..
+        self.copyfile(self.fp, fp, pos + size)
 
     @staticmethod
     def save(*args, **kwargs):
         raise NotImplementedError
 
 
+class CRC(object):
+
+    def __init__(self, width=4, poly=0x04C11DB7, reverse=False, initial=0):
+        self.bits = width * 8
+        self.initial = initial
+        self.table = []
+        topbit = self.bitmask(self.bits - 1)
+        for index in xrange(256):
+            if reverse:
+                index = self.reflect(index, 8)
+            r = index << (self.bits - 8)
+            for i in xrange(8):
+                if r & topbit:
+                    r = (r << 1) ^ poly
+                else:
+                    r <<= 1
+            if reverse:
+                r = self.reflect(r, self.bits)
+            self.table.append(r & ((((1 << (self.bits - 1)) - 1) << 1) | 1))
+
+    def checksum(self, data):
+        clear = 2 ** self.bits - 1
+        r = self.initial
+        for byte in data:
+            r = ((r << 8) ^ self.table[(r >> 24) ^ ord(byte)]) & clear
+        return r
+
+    @classmethod
+    def reflect(cls, v, b):
+        t = v
+        for i in xrange(b):
+            if t & 1:
+                v |=  cls.bitmask((b - 1) - i)
+            else:
+                v &= ~cls.bitmask((b - 1) - i)
+            t >>= 1
+        return v
+
+    @staticmethod
+    def bitmask(x):
+        return 1 << x
+
+
 class OGG(Vorbis):
 
     format = 'ogg'
+    editable = True
 
-    page = Struct('> 4s 2B Q 3L B')
+    head = Struct('< 4s 2B Q 3L B')
+
+    def __init__(self, *args, **kwargs):
+        self.pages = []
+        self.crc = CRC()
+        super(OGG, self).__init__(*args, **kwargs)
 
     def decode(self):
         self.fp.seek(0, os.SEEK_END)
         end = self.fp.tell()
         pos = 0
+        self.pages = []
         while pos < end:
             self.fp.seek(pos, os.SEEK_SET)
-            page = self.unpack(self.page)
-            if page[0] != 'OggS':
+            head = self.unpack(self.head)
+            if head[0] != 'OggS':
                 raise DecodeError('not an ogg page')
-            size = sum(ord(i) for i in self.fp.read(page[7]))
+            table = self.fp.read(head[7])
+            size = sum(ord(i) for i in table)
             if self.fp.read(7) == '\x03vorbis':
                 super(OGG, self).decode()
-            pos += self.page.size + page[7] + size
+                comment = True
+            else:
+                comment = False
+            self.pages.append((pos, size, comment, head, table))
+            pos += self.head.size + head[7] + size
+
+    def encode(self, fp, inplace=False):
+        for pos, size, comment, head, table in self.pages:
+            self.fp.seek(pos + self.head.size + head[7], os.SEEK_SET)
+            data = self.fp.read(size)
+
+            tmp = list(head)
+            tmp[6] = 0
+            tmp = self.head.pack(*tmp) + table + data
+            checksum = self.crc.checksum(tmp)
+
+            #print 'chksum', checksum == head[6]
+
+            # fp.write(self.head.pack(*head))
+            # fp.write(table)
+            # pos = pos + self.head.size + head[7]
+            # self.copyfile(self.fp, fp, pos, pos + size)
+
+    @staticmethod
+    def save(*args, **kwargs):
+        raise NotImplementedError
 
 
 def tagopen(file, readonly=False):
@@ -1610,3 +1705,17 @@ def tagopen(file, readonly=False):
 
 Errors = TaglibError, StructError, IOError, OSError, EOFError
 Decoders = FLAC, M4A, OGG, IFF, MP3
+
+
+def main():
+    tag = tagopen('sample.ogg')
+    tag.dumps()
+    return 0
+
+if __name__ == '__main__':
+    try:
+        import psyco
+        psyco.full()
+    except ImportError:
+        pass
+    sys.exit(main())
