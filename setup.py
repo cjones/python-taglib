@@ -10,7 +10,7 @@ if sys.hexversion < 0x02060000:
 
 from distutils.core import setup
 
-sys.dont_write_bytecode = True  # don't leave turds
+#sys.dont_write_bytecode = True  # don't leave turds
 from taglib import __version__
 
 def main():
